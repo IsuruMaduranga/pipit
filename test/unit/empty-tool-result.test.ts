@@ -1,0 +1,135 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { useShippedProfileWithAllTools } from "./helpers/profile.ts";
+import systemReminderExtension from "../../extensions/request/system-reminder/index.ts";
+import fileTrackerExtension from "../../extensions/safety/file-tracker/index.ts";
+import toolStyleExtension from "../../extensions/tools/tool-style/index.ts";
+import { REMINDER_CHANNEL } from "../../extensions/lib/request/reminders.ts";
+import { SessionTurnTracker } from "../../extensions/agents/subagents/session-turns.ts";
+import { applyPostToolUseOutcome } from "../../extensions/lib/rules/hook-protocol.ts";
+import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
+import { fileTrackerText } from "../../extensions/safety/file-tracker/text.ts";
+import { toolResultsText } from "../../extensions/lib/request/tool-results-text.ts";
+import { subagentResultText } from "../../extensions/lib/agents/subagent-text.ts";
+
+// This file covers the base's handling of grep, find and ls, which a profile may turn off.
+useShippedProfileWithAllTools();
+
+const text = (value: string) => ({ type: "text", text: value });
+/** The profile's text for a tool that returned nothing (One Code's: profile/test/profile-tool-results-text.test.ts). */
+const marker = (name: string) => toolResultsText.empty({ tool: name });
+
+// Apply returned changes in registration order, as pi's emitToolResult does.
+async function resultFor(content: unknown, name = "mcp__demo__silent", reminders = false, structuredContent?: unknown) {
+	const fake = createFakePi();
+	systemReminderExtension(fake.pi as never);
+	if (reminders) fake.events.emit(REMINDER_CHANNEL, { text: "A file changed." });
+	let event: any = { toolName: name, toolCallId: "c1", content, isError: false, input: {}, structuredContent };
+	for (const handler of fake.handlers.get("tool_result") ?? []) {
+		const change = await handler(event, createFakeCtx()) as any;
+		if (change) {
+			if (change.content !== undefined && change.structuredContent === undefined) delete event.structuredContent;
+			event = { ...event, ...change };
+		}
+	}
+	return event;
+}
+
+describe("the empty tool-result marker", () => {
+	it.each([undefined, null, "", " \t\n", [], [text("")], [text("\n"), text(" \t")]].map((content) => ({ content })))("replaces empty content $content", async ({ content }) => {
+		expect((await resultFor(content)).content).toEqual([text(marker("mcp__demo__silent"))]);
+	});
+
+	it.each([[text("answer")], [{ type: "image", data: "image", mimeType: "image/png" }], [text(""), { type: "image" }]].map((content) => ({ content })))("keeps nonempty content $content", async ({ content }) => {
+		expect((await resultFor(content)).content).toBe(content);
+	});
+
+	it("marks an empty PostToolUse replacement before retaining its reminder tail", () => {
+		const reminder = text("<system-reminder>\nA file changed.\n</system-reminder>");
+		expect(applyPostToolUseOutcome([text("old output"), reminder], { updatedToolResult: "" }, "mcp__demo__silent")).toEqual([
+			text(marker("mcp__demo__silent")), reminder,
+		]);
+	});
+
+	it("marks a hook's empty replacement of a read result; the raw-read exception is for pi's own bytes", () => {
+		expect(applyPostToolUseOutcome([text("file body")], { updatedToolResult: "  " }, "read")).toEqual([text(marker("Read"))]);
+	});
+
+	it("adds the marker, preserves structured content, and leaves a pending reminder out of the stored result", async () => {
+		const structuredContent = { exit_code: 0, output: "" };
+		const result = await resultFor([], "bash", true, structuredContent);
+		// The reminder rides the next request's tail instead (lib/request/reminders.ts).
+		expect(result.content).toEqual([text(marker("Bash"))]);
+		expect(result.structuredContent).toBe(structuredContent);
+		expect(result.isError).toBe(false);
+	});
+});
+
+describe("completed subagents without a reply", () => {
+	it("returns the profile's completed-empty text without declaring a task failure", () => {
+		const tracker = new SessionTurnTracker();
+		tracker.beginTurn();
+		tracker.process({ type: "message_end", message: { role: "assistant", content: [], stopReason: "stop" } });
+		tracker.process({ type: "agent_settled" });
+		expect(tracker.turnOutcome().output).toBe(subagentResultText().noOutput);
+		expect(tracker.turnOutcome().failed).toBeUndefined();
+	});
+});
+
+describe("built-in empty results", () => {
+	const dirs: string[] = [];
+	afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+	it("keeps the empty-file warning after generic normalization, with no reminder in the stored result", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "empty-result-read-"));
+		dirs.push(dir);
+		writeFileSync(join(dir, "empty.txt"), "");
+		const fake = createFakePi();
+		systemReminderExtension(fake.pi as never);
+		toolStyleExtension(fake.pi as never);
+		fileTrackerExtension(fake.pi as never);
+		const ctx = createFakeCtx({ cwd: dir });
+		const result = await fake.tools.get("read")!.execute("r1", { path: "empty.txt" }, undefined, undefined, ctx) as any;
+		fake.events.emit(REMINDER_CHANNEL, { text: "A file changed." });
+		let event: any = { ...result, toolName: "read", toolCallId: "r1", input: { path: "empty.txt" }, isError: false };
+		for (const handler of fake.handlers.get("tool_result") ?? []) {
+			const change = await handler(event, ctx);
+			if (change) event = { ...event, ...change };
+		}
+		expect(event.content[0].text).toBe(fileTrackerText.toolResult({ kind: "empty" }));
+		expect(event.content).toHaveLength(1);
+	});
+
+	it.each([
+		{ source: " \t\n", args: {}, expected: " \t\n" },
+		{ source: "hello\n", args: { offset: 2 }, expected: "" },
+	])("does not mistake Read's raw blank file bytes for an empty mapped result: $source", async ({ source, args, expected }) => {
+		const dir = mkdtempSync(join(tmpdir(), "empty-result-blank-read-"));
+		dirs.push(dir);
+		writeFileSync(join(dir, "blank.txt"), source);
+		const fake = createFakePi();
+		systemReminderExtension(fake.pi as never);
+		toolStyleExtension(fake.pi as never);
+		fileTrackerExtension(fake.pi as never);
+		const ctx = createFakeCtx({ cwd: dir });
+		const input = { path: "blank.txt", ...args };
+		const result = await fake.tools.get("read")!.execute("r2", input, undefined, undefined, ctx) as any;
+		let event: any = { ...result, toolName: "read", toolCallId: "r2", input, isError: false };
+		for (const handler of fake.handlers.get("tool_result") ?? []) {
+			const change = await handler(event, ctx);
+			if (change) event = { ...event, ...change };
+		}
+		expect(event.content).toEqual([text(expected)]);
+	});
+
+	it("uses the profile's no-files text for pi find", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "empty-result-find-"));
+		dirs.push(dir);
+		const fake = createFakePi();
+		toolStyleExtension(fake.pi as never);
+		const result = await fake.tools.get("find")!.execute("f1", { pattern: "*.absent" }, undefined, undefined, createFakeCtx({ cwd: dir })) as any;
+		expect((await resultFor(result.content, "find")).content).toEqual([text(toolResultsText.noFilesFound)]);
+	});
+});

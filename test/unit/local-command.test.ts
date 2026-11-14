@@ -1,0 +1,107 @@
+import { describe, expect, it } from "vitest";
+import {
+	announceLocalCommand,
+	commandInputBlock,
+	commandStdoutBlock,
+	localCommandCaveat,
+	localCommandBlocks,
+	registerLocalCommand,
+} from "../../extensions/lib/ui/local-command.ts";
+import { escapeXml } from "../../extensions/lib/core/xml.ts";
+import { modelSwitchStdout } from "../../extensions/ui/model-default/index.ts";
+import { REMINDER_CHANNEL } from "../../extensions/lib/request/reminders.ts";
+import { ARGUMENT_HINT_CHANNEL } from "../../extensions/lib/ui/argument-hints.ts";
+import { notificationWords } from "../../extensions/lib/notify/notification-words.ts";
+
+/** The caveat block as the base wraps the profile's caveat (One Code's: profile/test/local-command-wording.test.ts). */
+const caveatBlock = () => `<local-command-caveat>${notificationWords().localCommandCaveat}</local-command-caveat>\n`;
+
+describe("local-command breadcrumbs (Claude Code's three blocks)", () => {
+	it("reproduces the /model trio byte for byte", () => {
+		expect(localCommandBlocks({ name: "model", stdout: "Set model to `Sonnet 5` and saved as your default for new sessions" })).toEqual([
+			caveatBlock(),
+			"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args></command-args>\n",
+			"<local-command-stdout>Set model to `Sonnet 5` and saved as your default for new sessions</local-command-stdout>\n",
+		]);
+	});
+
+	it("/clear carries an empty stdout block", () => {
+		expect(localCommandBlocks({ name: "clear" })[2]).toBe("<local-command-stdout></local-command-stdout>\n");
+		expect(localCommandCaveat()).toBe(caveatBlock());
+	});
+
+	it("carries trimmed args and XML-escapes stdout like CC's escapeXml (& < > only)", () => {
+		expect(commandInputBlock("effort", "  high ")).toContain("<command-args>  high </command-args>");
+		expect(localCommandBlocks({ name: "effort", args: "  high " })[1]).toContain("<command-args>high</command-args>");
+		expect(escapeXml(`a & b < c > "d"`)).toBe(`a &amp; b &lt; c &gt; "d"`);
+		expect(commandStdoutBlock("<x>")).toBe("<local-command-stdout>&lt;x&gt;</local-command-stdout>\n");
+	});
+
+	it("announces over the reminder channel as raw user-prepend blocks, in order", () => {
+		const emitted: Array<[string, unknown]> = [];
+		announceLocalCommand({ events: { emit: (channel: string, data: unknown) => emitted.push([channel, data]) } }, { name: "clear" });
+		expect(emitted.map(([channel]) => channel)).toEqual([REMINDER_CHANNEL, REMINDER_CHANNEL, REMINDER_CHANNEL]);
+		expect(emitted.map(([, payload]) => payload)).toEqual(
+			localCommandBlocks({ name: "clear" }).map((text, i) => ({ text, placement: "user-prepend", raw: true, ...(i === 0 ? { once: true } : {}) })),
+		);
+	});
+
+	it("the /model stdout drops the persisted claim when the settings write failed", () => {
+		expect(modelSwitchStdout("Sonnet 5", true)).toBe("Set model to `Sonnet 5` and saved as your default for new sessions");
+		expect(modelSwitchStdout("Sonnet 5", false)).toBe("Set model to `Sonnet 5`");
+	});
+});
+
+describe("registerLocalCommand", () => {
+	it("registers the command with the breadcrumb announced before the handler runs", async () => {
+		const order: string[] = [];
+		const registered = new Map<string, { handler: (args: string, ctx: unknown) => unknown; description?: string }>();
+		const pi = {
+			events: { emit: (_channel: string, data: unknown) => order.push(`emit:${(data as { text: string }).text.slice(0, 14)}`) },
+			registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => unknown; description?: string }) =>
+				registered.set(name, options),
+		};
+		registerLocalCommand(pi, "effort", { description: "d", handler: async (args: string) => void order.push(`handler:${args}`) });
+		expect(registered.get("effort")?.description).toBe("d");
+		await registered.get("effort")!.handler(" high", {});
+		expect(order).toEqual(["emit:<local-command", "emit:<command-name>", "emit:<local-command", "handler: high"]);
+	});
+
+	/** A pi that records each emitted block's text, in order, and keeps the registered handlers. */
+	function fakePi(log: string[] = []) {
+		const registered = new Map<string, { handler: (args: string, ctx: unknown) => unknown }>();
+		const pi = {
+			events: { emit: (_channel: string, data: unknown) => log.push((data as { text: string }).text) },
+			registerCommand: (name: string, options: { handler: (args: string, ctx: unknown) => unknown }) => registered.set(name, options),
+		};
+		return { pi, log, run: (name: string) => registered.get(name)!.handler("", {}) };
+	}
+
+	it("with reportsResult, announces after the handler with its returned text as the stdout", async () => {
+		const { pi, log, run } = fakePi();
+		registerLocalCommand(pi, "memory", { reportsResult: true, handler: async () => (log.push("handler"), "Cancelled memory editing") });
+		await run("memory");
+		expect(log).toEqual(["handler", ...localCommandBlocks({ name: "memory", stdout: "Cancelled memory editing" })]);
+	});
+
+	it("with reportsResult, still announces (empty stdout) when the handler returns nothing or throws", async () => {
+		const { pi, log, run } = fakePi();
+		registerLocalCommand(pi, "quiet", { reportsResult: true, handler: () => {} });
+		registerLocalCommand(pi, "boom", { reportsResult: true, handler: async () => { throw new Error("x"); } });
+		await run("quiet");
+		await expect(run("boom")).rejects.toThrow("x");
+		expect(log).toEqual([...localCommandBlocks({ name: "quiet" }), ...localCommandBlocks({ name: "boom" })]);
+	});
+
+	it("announces an argumentHint instead of passing it to pi", () => {
+		const emitted: unknown[] = [];
+		const registered = new Map<string, Record<string, unknown>>();
+		const pi = {
+			events: { emit: (channel: string, data: unknown) => emitted.push([channel, data]) },
+			registerCommand: (name: string, options: Record<string, unknown>) => registered.set(name, options),
+		};
+		registerLocalCommand(pi, "loop", { description: "d", argumentHint: "[interval] [prompt]", handler: () => {} });
+		expect(emitted).toEqual([[ARGUMENT_HINT_CHANNEL, { command: "loop", hint: "[interval] [prompt]" }]]);
+		expect(registered.get("loop")).not.toHaveProperty("argumentHint");
+	});
+});

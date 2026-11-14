@@ -1,0 +1,277 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	discoverPlugins,
+	entryAppliesToCwd,
+	findPluginCommands,
+	findPluginSkills,
+	invalidatePluginsCache,
+	loadInstalledPlugins,
+	pluginResources,
+	splitPluginKey,
+} from "../../extensions/lib/plugins/plugins.ts";
+import { setOverride } from "../../extensions/lib/plugins/plugin-overrides.ts";
+import { setSkillOverride, skillOverrideKey } from "../../extensions/lib/plugins/skill-overrides.ts";
+import { shellQuote } from "../../extensions/lib/shell/shell-quote.ts";
+import { splitShellPlaceholders, substituteArguments } from "../../extensions/tools/plugins/template.ts";
+import { usePluginRoots, writePlugin, writeRegistry as writeRootRegistry } from "./helpers/plugin-roots.ts";
+
+describe("entryAppliesToCwd (review L6)", () => {
+	it("user scope and no-projectPath entries apply everywhere; project/local scope is confined", () => {
+		expect(entryAppliesToCwd({ scope: "user", projectPath: "/x" }, "/anywhere")).toBe(true);
+		expect(entryAppliesToCwd({ scope: "project" }, "/anywhere")).toBe(true); // no projectPath
+		expect(entryAppliesToCwd({ scope: "project", projectPath: "/x" }, undefined)).toBe(true); // cwd unknown
+		expect(entryAppliesToCwd({ scope: "project", projectPath: "/x" }, "/x")).toBe(true);
+		expect(entryAppliesToCwd({ scope: "local", projectPath: "/x" }, "/x/sub")).toBe(true);
+		expect(entryAppliesToCwd({ scope: "project", projectPath: "/x" }, "/y")).toBe(false);
+		expect(entryAppliesToCwd({ scope: "local", projectPath: "/x" }, "/xy")).toBe(false); // not a path-boundary match
+	});
+});
+
+describe("splitPluginKey", () => {
+	it("splits name@marketplace", () => {
+		expect(splitPluginKey("pr-review-toolkit@claude-plugins-official")).toEqual({
+			name: "pr-review-toolkit",
+			marketplace: "claude-plugins-official",
+		});
+	});
+
+	it("handles a bare name", () => {
+		expect(splitPluginKey("local-plugin")).toEqual({ name: "local-plugin" });
+	});
+});
+
+describe("plugin discovery", () => {
+	let root: string;
+	let claudeDir: string;
+	let installPath: string;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "cc-plugins-"));
+		claudeDir = join(root, ".claude");
+		installPath = join(claudeDir, "plugins", "cache", "market", "demo", "1.0.0");
+		mkdirSync(join(installPath, ".claude-plugin"), { recursive: true });
+		writeFileSync(
+			join(installPath, ".claude-plugin", "plugin.json"),
+			JSON.stringify({ name: "demo", description: "A demo plugin" }),
+		);
+	});
+	afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+	const writeRegistry = (plugins: Record<string, unknown[]>) => writeRootRegistry(join(claudeDir, "plugins"), plugins);
+
+	it("reads the registry and the plugin manifest", () => {
+		writeRegistry({ "demo@market": [{ scope: "user", installPath, version: "1.0.0" }] });
+		const plugins = loadInstalledPlugins(join(claudeDir, "plugins"));
+		expect(plugins).toHaveLength(1);
+		expect(plugins[0]).toMatchObject({
+			id: "demo@market",
+			name: "demo",
+			marketplace: "market",
+			version: "1.0.0",
+			description: "A demo plugin",
+		});
+	});
+
+	it("skips entries whose install path is gone; enabled passes through raw", () => {
+		writeRegistry({
+			"demo@market": [{ scope: "user", installPath, version: "1.0.0" }],
+			"ghost@market": [{ scope: "user", installPath: join(root, "missing") }],
+			"off@market": [{ scope: "user", installPath, enabled: false }],
+		});
+		const plugins = loadInstalledPlugins(join(claudeDir, "plugins"));
+		// No enabled policy at this layer — Claude Code's own entries carry no
+		// enabled field, so the loader only drops missing install paths.
+		expect(plugins.map((p) => p.id).sort()).toEqual(["demo@market", "off@market"]);
+		expect(plugins.find((p) => p.id === "off@market")?.rawEnabled).toBe(false);
+		expect(plugins.find((p) => p.id === "demo@market")?.rawEnabled).toBeUndefined();
+	});
+
+	it("returns nothing when the registry is absent or malformed", () => {
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"))).toEqual([]);
+		mkdirSync(join(claudeDir, "plugins"), { recursive: true });
+		writeFileSync(join(claudeDir, "plugins", "installed_plugins.json"), "{ broken");
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"))).toEqual([]);
+	});
+
+	it("skips a project/local-scoped entry unless cwd is that project or under it (review L6)", () => {
+		const projA = join(root, "projA");
+		writeRegistry({
+			"demo@market": [{ scope: "project", projectPath: projA, installPath, version: "1.0.0" }],
+		});
+		// A different project: the project-scoped plugin does not apply.
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"), join(root, "projB"))).toEqual([]);
+		// The owning project (and a descendant) sees it.
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"), projA)).toHaveLength(1);
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"), join(projA, "sub"))).toHaveLength(1);
+		// No cwd given (or a user-scoped entry) applies everywhere.
+		expect(loadInstalledPlugins(join(claudeDir, "plugins"))).toHaveLength(1);
+	});
+
+	it("falls back to the registry name for a non-string or unsafe manifest name (review H2)", () => {
+		for (const badName of [42, {}, "", "../x", "a:b", "a b"] as unknown[]) {
+			writeFileSync(join(installPath, ".claude-plugin", "plugin.json"), JSON.stringify({ name: badName, description: 5 }));
+			writeRegistry({ "demo@market": [{ scope: "user", installPath, version: "1.0.0" }] });
+			const plugins = loadInstalledPlugins(join(claudeDir, "plugins"));
+			expect(plugins).toHaveLength(1);
+			// Name falls back to the key's, and a non-string description is dropped —
+			// no throw, so a later localeCompare sort cannot crash startup.
+			expect(plugins[0].name).toBe("demo");
+			expect(plugins[0].description).toBeUndefined();
+		}
+	});
+
+	it("skips malformed registry entries without losing valid plugins", () => {
+		writeRegistry({
+			"broken@market": [null, 4, { installPath: {} }, { installPath, scope: "project", projectPath: {} }],
+			"demo@market": [null, { installPath, version: { hostile: true } }],
+		});
+		const plugins = loadInstalledPlugins(join(claudeDir, "plugins"), root);
+		expect(plugins.map((plugin) => plugin.id)).toEqual(["demo@market"]);
+		expect(plugins[0].version).toBeUndefined();
+	});
+
+	it("detects only the resource directories that exist", () => {
+		const plugin = { name: "demo", path: installPath };
+		expect(pluginResources(plugin)).toEqual({
+			agentsDir: undefined,
+			commandsDir: undefined,
+			skillsDir: undefined,
+			mcpConfig: undefined,
+			hooksConfig: undefined,
+			lspConfig: undefined,
+		});
+
+		mkdirSync(join(installPath, "agents"), { recursive: true });
+		mkdirSync(join(installPath, "skills"), { recursive: true });
+		writeFileSync(join(installPath, ".mcp.json"), "{}");
+		const resources = pluginResources(plugin);
+		expect(resources.agentsDir).toBe(join(installPath, "agents"));
+		expect(resources.skillsDir).toBe(join(installPath, "skills"));
+		expect(resources.mcpConfig).toBe(join(installPath, ".mcp.json"));
+		expect(resources.commandsDir).toBeUndefined();
+	});
+
+	it("namespaces skills and commands by plugin name", () => {
+		const plugin = { name: "demo", path: installPath };
+		mkdirSync(join(installPath, "skills", "improver"), { recursive: true });
+		writeFileSync(join(installPath, "skills", "improver", "SKILL.md"), "---\nname: improver\n---\nbody");
+		mkdirSync(join(installPath, "skills", "not-a-skill"), { recursive: true });
+		mkdirSync(join(installPath, "commands"), { recursive: true });
+		writeFileSync(join(installPath, "commands", "commit.md"), "body");
+		writeFileSync(join(installPath, "commands", "notes.txt"), "ignored");
+
+		expect(findPluginSkills(plugin, join(installPath, "skills"))).toEqual([
+			{ name: "demo:improver", plugin: "demo", path: join(installPath, "skills", "improver", "SKILL.md") },
+		]);
+		expect(findPluginCommands(plugin, join(installPath, "commands"))).toEqual([
+			{ name: "demo:commit", plugin: "demo", path: join(installPath, "commands", "commit.md") },
+		]);
+	});
+});
+
+describe("discoverPlugins two-root merge", () => {
+	const roots = usePluginRoots();
+
+	it("overrides.json wins over Claude Code settings and marks the plugin overridden", () => {
+		const a = writePlugin(roots.claudePluginsDir, "alpha");
+		writeRootRegistry(roots.claudePluginsDir, { "alpha@market": [{ scope: "user", installPath: a }] });
+		mkdirSync(join(roots.home, ".claude"), { recursive: true });
+		writeFileSync(join(roots.home, ".claude", "settings.json"), JSON.stringify({ enabledPlugins: { "alpha@market": true } }));
+		setOverride(roots.productRoot, "alpha@market", false);
+		invalidatePluginsCache();
+
+		expect(discoverPlugins(roots).plugins[0]).toMatchObject({ enabled: false, overridden: true });
+	});
+
+	it("one-code origin: entry-level enabled respected, dataRoot points at our root", () => {
+		const a = writePlugin(roots.productRoot, "ours");
+		writeRootRegistry(roots.productRoot, { "ours@market": [{ scope: "user", installPath: a, enabled: false }] });
+
+		const plugin = discoverPlugins(roots).plugins[0];
+		expect(plugin).toMatchObject({ originRoot: "product", enabled: false, rawEnabled: false });
+		expect(plugin?.dataRoot).toBe(join(roots.productRoot, "data"));
+	});
+
+	it("same id in both roots: the one-code copy wins", () => {
+		const claude = writePlugin(roots.claudePluginsDir, "dup");
+		const ours = writePlugin(roots.productRoot, "dup");
+		writeRootRegistry(roots.claudePluginsDir, { "dup@market": [{ scope: "user", installPath: claude }] });
+		writeRootRegistry(roots.productRoot, { "dup@market": [{ scope: "user", installPath: ours }] });
+
+		const discovered = discoverPlugins(roots);
+		expect(discovered.plugins).toHaveLength(1);
+		expect(discovered.plugins[0]).toMatchObject({ originRoot: "product", path: ours });
+	});
+
+	it("disabled plugins contribute no resources but still appear in plugins/byPlugin", () => {
+		const a = writePlugin(roots.productRoot, "alpha", { skill: "helper" });
+		writeRootRegistry(roots.productRoot, { "alpha@market": [{ scope: "user", installPath: a, enabled: false }] });
+
+		const discovered = discoverPlugins(roots);
+		expect(discovered.plugins).toHaveLength(1);
+		expect(discovered.skills).toEqual([]);
+		expect(discovered.byPlugin.get("alpha@market")?.skills).toBe(1);
+	});
+
+	it("skill overrides drop individual plugin skills from the wired set", () => {
+		const a = writePlugin(roots.productRoot, "ours", { skill: "helper" });
+		writeRootRegistry(roots.productRoot, { "ours@market": [{ scope: "user", installPath: a }] });
+		setSkillOverride(roots.productRoot, skillOverrideKey("plugin", "ours:helper"), false);
+		invalidatePluginsCache();
+
+		expect(discoverPlugins(roots).skills).toEqual([]);
+	});
+
+	it("caches per roots; invalidatePluginsCache forces a re-read", () => {
+		const a = writePlugin(roots.productRoot, "ours");
+		writeRootRegistry(roots.productRoot, { "ours@market": [{ scope: "user", installPath: a, enabled: true }] });
+		expect(discoverPlugins(roots).plugins[0]?.enabled).toBe(true);
+
+		writeRootRegistry(roots.productRoot, { "ours@market": [{ scope: "user", installPath: a, enabled: false }] });
+		expect(discoverPlugins(roots).plugins[0]?.enabled).toBe(true); // cached
+		invalidatePluginsCache();
+		expect(discoverPlugins(roots).plugins[0]?.enabled).toBe(false);
+	});
+});
+
+describe("command template expansion", () => {
+	it("substitutes $ARGUMENTS, $@ and positional arguments", () => {
+		expect(substituteArguments("run $1 then $2", "alpha beta")).toBe("run alpha then beta");
+		expect(substituteArguments("all: $ARGUMENTS", "  a b  ")).toBe("all: a b");
+		expect(substituteArguments("all: $@", "a b")).toBe("all: a b");
+	});
+
+	it("leaves missing positionals empty", () => {
+		expect(substituteArguments("[$1][$2]", "only")).toBe("[only][]");
+	});
+
+	it("splits a body into text and shell placeholders", () => {
+		const body = "status:\n!`git status`\ndiff:\n!`git diff`";
+		expect(splitShellPlaceholders(body)).toEqual([
+			{ kind: "text", text: "status:\n" },
+			{ kind: "shell", command: "git status" },
+			{ kind: "text", text: "\ndiff:\n" },
+			{ kind: "shell", command: "git diff" },
+		]);
+	});
+
+	it("handles a body with no placeholders", () => {
+		expect(splitShellPlaceholders("plain body")).toEqual([{ kind: "text", text: "plain body" }]);
+	});
+
+	it("quotes arguments word by word inside a command", () => {
+		expect(substituteArguments("git log $ARGUMENTS", "--oneline -5", shellQuote)).toBe("git log '--oneline' '-5'");
+		expect(substituteArguments("grep $1 x", "it's", shellQuote)).toBe("grep 'it'\\''s' x");
+		expect(substituteArguments("echo [$2]", "one", shellQuote)).toBe("echo ['']");
+	});
+
+	it("never substitutes inside an argument it already inserted", () => {
+		// A second pass turned the quoted `'$1'` into an unquoted first argument.
+		expect(substituteArguments("run $ARGUMENTS", "x;touch${IFS}p $1", shellQuote)).toBe("run 'x;touch${IFS}p' '$1'");
+		expect(substituteArguments("echo $@", "a $1", shellQuote)).toBe("echo 'a' '$1'");
+		expect(substituteArguments("cost $ARGUMENTS", "cost $1")).toBe("cost cost $1");
+	});
+});

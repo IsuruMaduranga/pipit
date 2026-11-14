@@ -1,0 +1,122 @@
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { describe, expect, it } from "vitest";
+// pi's own resolver, reached by file path (its package root does not export it), to pin the vendored copy to it.
+import { resolveToCwd } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/path-utils.js";
+import { shellQuote } from "../../extensions/lib/shell/shell-quote.ts";
+import { normalizeToolPath } from "../../extensions/lib/rules/tool-path.ts";
+import { rewriteToolInput, validateWorktreeName } from "../../extensions/safety/worktree/rewrite.ts";
+
+const WT = "/repo/.claude/worktrees/fix";
+
+describe("rewriteToolInput", () => {
+	it("prefixes bash commands with a cd into the worktree", () => {
+		const input: Record<string, unknown> = { command: "npm test" };
+		rewriteToolInput("bash", input, WT);
+		expect(input.command).toBe(`cd '${WT}' && (npm test\n)`);
+	});
+
+	it("returns the original bash command for the side channel instead of storing it in input", () => {
+		// Without the original, the cd-wrapper defeats every configured Bash
+		// allow/ask/deny rule for the duration of the worktree session. It must
+		// travel over the bus keyed by toolCallId, never inside input: a key there
+		// is model-writable and the gate would match rules against a fake.
+		const input: Record<string, unknown> = { command: "npm run test:unit" };
+		const { originalCommand } = rewriteToolInput("bash", input, WT);
+		expect(originalCommand).toBe("npm run test:unit");
+		expect(Object.keys(input)).toEqual(["command"]);
+	});
+
+	it("returns no original for non-bash tools", () => {
+		expect(rewriteToolInput("edit", { path: "a.ts" }, WT)).toEqual({});
+		expect(rewriteToolInput("tool_search", { query: "x" }, WT)).toEqual({});
+	});
+
+	it("resolves relative paths against the worktree and leaves absolute ones alone", () => {
+		const relative: Record<string, unknown> = { path: "src/index.ts" };
+		rewriteToolInput("edit", relative, WT);
+		expect(relative.path).toBe(resolve(WT, "src/index.ts"));
+
+		const absolute: Record<string, unknown> = { path: "/etc/hosts" };
+		rewriteToolInput("read", absolute, WT);
+		expect(absolute.path).toBe("/etc/hosts");
+	});
+
+	it("rewrites a Claude Code-shaped notebook_path so the edit lands in the worktree", () => {
+		// A notebook_edit using CC's `notebook_path` (not `path`) must still be
+		// redirected into the worktree, or the edit silently hits the shared
+		// checkout (code-review).
+		const nb: Record<string, unknown> = { notebook_path: "analysis.ipynb", cell_id: "c1" };
+		rewriteToolInput("notebook_edit", nb, WT);
+		expect(nb.notebook_path).toBe(resolve(WT, "analysis.ipynb"));
+		expect(nb.path).toBeUndefined();
+
+		const abs: Record<string, unknown> = { notebook_path: "/tmp/x.ipynb" };
+		rewriteToolInput("notebook_edit", abs, WT);
+		expect(abs.notebook_path).toBe("/tmp/x.ipynb");
+	});
+
+	it("defaults a missing path to the worktree for cwd-scoped tools only", () => {
+		const ls: Record<string, unknown> = {};
+		rewriteToolInput("ls", ls, WT);
+		expect(ls.path).toBe(WT);
+
+		const grep: Record<string, unknown> = { pattern: "x" };
+		rewriteToolInput("grep", grep, WT);
+		expect(grep.path).toBe(WT);
+
+		const read: Record<string, unknown> = {};
+		rewriteToolInput("read", read, WT);
+		expect(read.path).toBeUndefined();
+	});
+
+	it("ignores tools that take no paths", () => {
+		const input: Record<string, unknown> = { query: "select:Read" };
+		rewriteToolInput("tool_search", input, WT);
+		expect(input).toEqual({ query: "select:Read" });
+	});
+
+	it("shell-quotes worktree paths containing single quotes", () => {
+		expect(shellQuote("/tmp/it's here")).toBe("'/tmp/it'\\''s here'");
+	});
+});
+
+describe("validateWorktreeName", () => {
+	it("accepts plain and slash-separated names", () => {
+		expect(validateWorktreeName("fix-bug_2.0")).toBeUndefined();
+		expect(validateWorktreeName("feature/login")).toBeUndefined();
+	});
+
+	it("rejects bad characters, dot segments, and over-long names", () => {
+		expect(validateWorktreeName("has space")).toBe("characters");
+		expect(validateWorktreeName("a/../b")).toBe("dotSegment");
+		expect(validateWorktreeName("x".repeat(65))).toBe("length");
+		expect(validateWorktreeName("")).toBe("length");
+	});
+});
+
+describe("rewriteToolInput reads paths the way pi's tools do", () => {
+	it("leaves ~ and file:// paths absolute instead of nesting them in the worktree", () => {
+		const tilde: Record<string, unknown> = { path: "~/proj/src/new.ts" };
+		rewriteToolInput("write", tilde, WT);
+		expect(tilde.path).toBe("~/proj/src/new.ts");
+
+		const href = pathToFileURL(resolve("/x/y.ts")).href;
+		const url: Record<string, unknown> = { path: href };
+		rewriteToolInput("read", url, WT);
+		expect(url.path).toBe(href);
+	});
+
+	it("drops a leading @ before resolving a relative path against the worktree", () => {
+		const at: Record<string, unknown> = { path: "@src/new.ts" };
+		rewriteToolInput("write", at, WT);
+		expect(at.path).toBe(resolve(WT, "src/new.ts"));
+	});
+
+	it("lands every spelling where pi's resolveToCwd would, relative to the worktree", () => {
+		for (const spelling of ["src/a.ts", "@src/a.ts", "~/a.ts", "~", "@/abs/a.ts", pathToFileURL(resolve("/x/y.ts")).href, "/abs/b.ts", "a\u2003b.ts"]) {
+			const normalized = normalizeToolPath(spelling);
+			expect(resolve(WT, normalized)).toBe(resolveToCwd(spelling, WT));
+		}
+	});
+});

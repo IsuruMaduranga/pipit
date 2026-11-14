@@ -1,0 +1,139 @@
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { findSessionFile, freeRunName, nextRunName, resolveRunName, RunRegistry } from "../../extensions/agents/subagents/runs.ts";
+import { subagentResultText } from "../../extensions/lib/agents/subagent-text.ts";
+
+describe("nextRunName", () => {
+	it("allocates the lowest free <agent>-<n>", () => {
+		expect(nextRunName([], "explore")).toBe("explore-1");
+		expect(nextRunName(["explore-1", "explore-2"], "explore")).toBe("explore-3");
+		expect(nextRunName(["explore-2"], "explore")).toBe("explore-1");
+	});
+});
+
+describe("freeRunName", () => {
+	it("uses the base name when free, else the lowest free -n from 2", () => {
+		expect(freeRunName([], "what-number-does")).toBe("what-number-does");
+		expect(freeRunName(["what-number-does"], "what-number-does")).toBe("what-number-does-2");
+		expect(freeRunName(["fork", "fork-2", "fork-3"], "fork")).toBe("fork-4");
+	});
+});
+
+describe("RunRegistry", () => {
+	const record = (name: string, taskId: string) => ({ name, agent: "explore", taskId, sessionSearchDir: "", cwd: "/x" });
+
+	it("resolves by name, id, and unique id prefix; latest wins per name", () => {
+		const registry = new RunRegistry();
+		registry.add(record("explore-1", "b1111111"));
+		registry.add(record("explore-1", "b2222222"));
+		expect(registry.resolve("explore-1")?.taskId).toBe("b2222222");
+		expect(registry.resolve("b1111111")?.name).toBe("explore-1");
+		expect(registry.resolve("b222")?.taskId).toBe("b2222222");
+		expect(registry.resolve("missing")).toBeUndefined();
+	});
+
+	it("keeps only the records a /tree switch retains, and every name held for a spawn in flight", () => {
+		const registry = new RunRegistry();
+		registry.add(record("explore-1", "b1111111"));
+		registry.add(record("explore-2", "b2222222"));
+		registry.reserve("explore-3");
+		registry.retain((run) => run.taskId === "b2222222");
+		expect(registry.resolve("explore-1")).toBeUndefined();
+		expect(registry.resolve("explore-2")?.taskId).toBe("b2222222");
+		expect(registry.names().sort()).toEqual(["explore-2", "explore-3"]);
+	});
+
+	it("refuses an empty or too-short prefix instead of matching whatever exists", () => {
+		const registry = new RunRegistry();
+		registry.add(record("explore-1", "b1111111"));
+		// "".startsWith("") is true — an empty ref used to deliver to the only run.
+		expect(registry.resolve("")).toBeUndefined();
+		expect(registry.resolve("b")).toBeUndefined();
+		expect(registry.resolve("b1")).toBeUndefined();
+		expect(registry.resolve("b11")?.taskId).toBe("b1111111");
+	});
+
+	it("forgets a run that never started, leaving an older run of the same name alone", () => {
+		const registry = new RunRegistry();
+		registry.add(record("fork-1", "c1111111"));
+		registry.remove("c1111111");
+		expect(registry.resolve("fork-1")).toBeUndefined();
+		expect(registry.list()).toEqual([]);
+		registry.add(record("explore-1", "d1111111"));
+		registry.add(record("explore-1", "d2222222"));
+		registry.remove("d1111111");
+		expect(registry.resolve("explore-1")?.taskId).toBe("d2222222");
+	});
+});
+
+describe("findSessionFile", () => {
+	let dir: string;
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("finds the newest .jsonl recursively", () => {
+		dir = mkdtempSync(join(tmpdir(), "cc-runs-test-"));
+		const nested = join(dir, "encoded-cwd");
+		mkdirSync(nested, { recursive: true });
+		const older = join(nested, "old.jsonl");
+		const newer = join(nested, "new.jsonl");
+		writeFileSync(older, "{}");
+		writeFileSync(newer, "{}");
+		const past = new Date(Date.now() - 60_000);
+		utimesSync(older, past, past);
+		writeFileSync(join(nested, "not-a-session.txt"), "x");
+		expect(findSessionFile(dir)).toBe(newer);
+	});
+
+	it("returns undefined for missing or empty dirs", () => {
+		dir = mkdtempSync(join(tmpdir(), "cc-runs-test-"));
+		expect(findSessionFile(dir)).toBeUndefined();
+		expect(findSessionFile(join(dir, "nope"))).toBeUndefined();
+	});
+});
+
+describe("RunRegistry.clear (S5)", () => {
+	it("drops every record so a new session starts empty", () => {
+		const registry = new RunRegistry();
+		registry.add({ name: "a", agent: "explore", taskId: "t1", sessionSearchDir: "", cwd: "/p" } as never);
+		expect(registry.names()).toEqual(["a"]);
+		registry.clear();
+		expect(registry.names()).toEqual([]);
+		expect(registry.resolve("a")).toBeUndefined();
+		expect(registry.resolve("t1")).toBeUndefined();
+	});
+});
+
+
+describe("resolveRunName", () => {
+	const record = (name: string, taskId: string) => ({ name, agent: "explore", taskId, sessionSearchDir: "", cwd: "/x" });
+
+	it("keeps a free requested name, and allocates <agent>-<n> when none was requested", () => {
+		const registry = new RunRegistry();
+		expect(resolveRunName(registry, "explore", "scout")).toEqual({ name: "scout" });
+		expect(resolveRunName(registry, "explore", undefined)).toEqual({ name: "explore-1" });
+		// The blank request also allocates; explore-1 is reserved by the previous pick.
+		expect(resolveRunName(registry, "explore", "  ")).toEqual({ name: "explore-2" });
+	});
+
+	it("reserves the picked name so a parallel same-turn spawn cannot pick it before the record lands", () => {
+		const registry = new RunRegistry();
+		expect(resolveRunName(registry, "explore", undefined).name).toBe("explore-1");
+		expect(resolveRunName(registry, "explore", undefined).name).toBe("explore-2");
+		expect(resolveRunName(registry, "explore", "explore-1").name).toBe("explore-3");
+		// Adding the record releases the reservation (the recorded name still counts).
+		registry.add(record("explore-1", "aaaa1111"));
+		expect(registry.names().sort()).toEqual(["explore-1", "explore-2", "explore-3"]);
+		expect(registry.list().map((r) => r.name)).toEqual(["explore-1"]);
+	});
+
+	it("renames a colliding request and explains which task holds the name (M1)", () => {
+		const registry = new RunRegistry();
+		registry.add(record("reviewer", "abc12345"));
+		registry.add(record("explore-1", "def67890"));
+		const resolved = resolveRunName(registry, "explore", "reviewer");
+		expect(resolved.name).toBe("explore-2");
+		expect(resolved.note).toBe(subagentResultText().renamed({ wanted: "reviewer", takenBy: "abc12345", name: "explore-2" }));
+	});
+});

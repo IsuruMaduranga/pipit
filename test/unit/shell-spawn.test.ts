@@ -1,0 +1,263 @@
+/**
+ * lib/shell-run/shell-spawn.ts — the resolvers with injected platform/env/fs, and the
+ * PowerShell operations against a REAL pwsh when one is on this machine (PATH,
+ * or the cc-windows-mode skill's portable copy); the repo never mocks
+ * child_process. Skipped cleanly where no pwsh exists.
+ */
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { localPwsh, windowsPowerShell } from "./helpers/local-pwsh.ts";
+import {
+	bashSpawnOrThrow,
+	createPowerShellOperations,
+	gitBashOverride,
+	isBashBinaryName,
+	POWERSHELL_ARGS,
+	powerShellEdition,
+	resolveBashSpawn,
+	resolvePowerShellSpawn,
+	type ShellSpawn,
+	spawnShellCommand,
+} from "../../extensions/lib/shell-run/shell-spawn.ts";
+import { envName } from "../../extensions/lib/profile/brand.mjs";
+
+const gitBash: ShellSpawn = { shell: "C:\\Program Files\\Git\\bin\\bash.exe", args: ["-c"] };
+
+describe("isBashBinaryName", () => {
+	it("accepts bash/sh with or without .exe, any case, either separator", () => {
+		for (const p of ["/bin/bash", "/bin/sh", "C:\\Git\\bin\\bash.exe", "D:/tools/SH.EXE", "bash"]) expect(isBashBinaryName(p)).toBe(true);
+	});
+	it("rejects anything else (CC 2.1.219 ignores a non-bash CLAUDE_CODE_GIT_BASH_PATH)", () => {
+		for (const p of ["C:\\Windows\\System32\\cmd.exe", "/usr/bin/zsh", "pwsh", "C:\\Git\\bin\\bashful.exe"]) expect(isBashBinaryName(p)).toBe(false);
+	});
+});
+
+const GIT_BASH = envName("GIT_BASH_PATH");
+
+describe("gitBashOverride", () => {
+	it("prefers the process environment over the settings env block", () => {
+		expect(gitBashOverride({ [GIT_BASH]: "C:\\a\\bash.exe" }, { [GIT_BASH]: "C:\\b\\bash.exe" })).toEqual({
+			path: "C:\\a\\bash.exe",
+			source: "env",
+			name: GIT_BASH,
+		});
+		expect(gitBashOverride({}, { [GIT_BASH]: "C:\\b\\bash.exe" })).toEqual({ path: "C:\\b\\bash.exe", source: "settings", name: GIT_BASH });
+		expect(gitBashOverride({ [GIT_BASH]: "  " }, {})).toBeUndefined();
+	});
+
+	it("prefers the product's own spelling over the provider's alias", () => {
+		expect(gitBashOverride({ [GIT_BASH]: "C:\\own\\bash.exe", CLAUDE_CODE_GIT_BASH_PATH: "C:\\cc\\bash.exe" }, {})).toEqual({
+			path: "C:\\own\\bash.exe",
+			source: "env",
+			name: GIT_BASH,
+		});
+	});
+});
+
+describe("resolveBashSpawn", () => {
+	it("uses a valid override through pi's resolver", () => {
+		const seen: Array<string | undefined> = [];
+		const result = resolveBashSpawn({
+			env: { [GIT_BASH]: "C:\\Git\\bin\\bash.exe" },
+			exists: () => true,
+			fallback: (custom) => {
+				seen.push(custom);
+				return { shell: custom ?? "/bin/bash", args: ["-c"] };
+			},
+		});
+		expect(seen).toEqual(["C:\\Git\\bin\\bash.exe"]);
+		expect(result.spawn?.shell).toBe("C:\\Git\\bin\\bash.exe");
+		expect(result.warning).toBeUndefined();
+	});
+
+	it("ignores a non-bash override with a warning and falls back", () => {
+		const result = resolveBashSpawn({
+			env: { [GIT_BASH]: "C:\\Windows\\System32\\cmd.exe" },
+			exists: () => true,
+			fallback: (custom) => {
+				expect(custom).toBeUndefined();
+				return gitBash;
+			},
+		});
+		expect(result.spawn).toEqual(gitBash);
+		expect(result.warning).toBe(`${GIT_BASH} ignored: "C:\\Windows\\System32\\cmd.exe" is not a bash or sh binary.`);
+	});
+
+	it("ignores a missing override with a warning", () => {
+		const result = resolveBashSpawn({
+			env: {},
+			settingsEnv: { [GIT_BASH]: "C:\\nope\\bash.exe" },
+			exists: () => false,
+			fallback: () => gitBash,
+		});
+		expect(result.spawn).toEqual(gitBash);
+		expect(result.warning).toBe(`${GIT_BASH} (settings.json env) ignored: "C:\\nope\\bash.exe" does not exist.`);
+	});
+
+	it("reports pi's error when no bash exists (Windows without Git for Windows)", () => {
+		const result = resolveBashSpawn({
+			env: {},
+			fallback: () => {
+				throw new Error("No bash shell found. Options:\n  1. Install Git for Windows");
+			},
+		});
+		expect(result.spawn).toBeUndefined();
+		expect(result.error).toMatch(/Install Git for Windows/);
+	});
+});
+
+describe("resolvePowerShellSpawn", () => {
+	it("on Windows uses pi's resolver and swallows its throw", () => {
+		expect(resolvePowerShellSpawn({ platform: "win32", windowsFallback: () => ({ shell: "C:\\pwsh.exe", args: [...POWERSHELL_ARGS] }) })).toEqual({
+			shell: "C:\\pwsh.exe",
+			args: [...POWERSHELL_ARGS],
+		});
+		expect(
+			resolvePowerShellSpawn({
+				platform: "win32",
+				windowsFallback: () => {
+					throw new Error("No PowerShell executable found.");
+				},
+			}),
+		).toBeUndefined();
+	});
+
+	it("elsewhere finds an executable pwsh on PATH with pi's argument list", () => {
+		const env = { PATH: "/usr/bin:/opt/pwsh" };
+		const which = (cmd: string, e: NodeJS.ProcessEnv) => (cmd === "pwsh" && e.PATH?.includes("/opt/pwsh") ? "/opt/pwsh/pwsh" : undefined);
+		expect(resolvePowerShellSpawn({ platform: "darwin", env, which })).toEqual({
+			shell: "/opt/pwsh/pwsh",
+			args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"],
+		});
+		expect(resolvePowerShellSpawn({ platform: "linux", env, which: () => undefined })).toBeUndefined();
+	});
+
+	// Windows has no execute bit (X_OK is existence there), so the mode half is POSIX-only.
+	it.skipIf(process.platform === "win32")("uses the shared PATH lookup, which requires the file to be executable", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pwsh-which-"));
+		writeFileSync(join(dir, "pwsh"), "#!/bin/sh\n", { mode: 0o644 });
+		expect(resolvePowerShellSpawn({ platform: "darwin", env: { PATH: dir } })).toBeUndefined();
+		chmodSync(join(dir, "pwsh"), 0o755);
+		expect(resolvePowerShellSpawn({ platform: "darwin", env: { PATH: dir } })?.shell).toBe(join(dir, "pwsh"));
+		rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("powerShellEdition", () => {
+	it("reads the edition off the executable name", () => {
+		expect(powerShellEdition({ shell: "C:\\Program Files\\PowerShell\\7\\pwsh.exe", args: [] })).toBe("core");
+		expect(powerShellEdition({ shell: "/opt/pwsh/pwsh", args: [] })).toBe("core");
+		expect(powerShellEdition({ shell: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", args: [] })).toBe("desktop");
+		expect(powerShellEdition(undefined)).toBe("unknown");
+	});
+});
+
+describe("spawnShellCommand", () => {
+	it("appends the command for argv transport and feeds stdin for the legacy-WSL form", async () => {
+		// The resolved bash (Git Bash on Windows) stands in for /bin/sh.
+		const bash = bashSpawnOrThrow().shell;
+		const sh: ShellSpawn = { shell: bash, args: ["-c"] };
+		const out = await collect(spawnShellCommand(sh, "echo argv-ok", { stdio: ["ignore", "pipe", "pipe"] }));
+		expect(out.trim()).toBe("argv-ok");
+		const viaStdin: ShellSpawn = { shell: bash, args: ["-s"], commandTransport: "stdin" };
+		const out2 = await collect(spawnShellCommand(viaStdin, "echo stdin-ok", { stdio: ["ignore", "pipe", "pipe"] }));
+		expect(out2.trim()).toBe("stdin-ok");
+	});
+});
+
+const pwsh = localPwsh();
+
+// pwsh's cold start took over 5 s on the Ubuntu CI runner; the suite's default timeout is too tight for it.
+describe.skipIf(!pwsh)("createPowerShellOperations (real pwsh)", { timeout: 30_000 }, () => {
+	const ops = createPowerShellOperations(() => pwsh);
+	const run = async (command: string, extra: { signal?: AbortSignal; timeout?: number } = {}) => {
+		let output = "";
+		const result = await ops.exec(command, process.cwd(), { onData: (d) => (output += d.toString()), ...extra });
+		return { ...result, output };
+	};
+
+	it("runs a command, streams its output, and reports the exit code", async () => {
+		const { exitCode, output } = await run("Write-Output 'hello from pwsh'; Write-Output $PSVersionTable.PSEdition");
+		expect(exitCode).toBe(0);
+		expect(output).toContain("hello from pwsh");
+		expect(output).toContain("Core");
+	});
+
+	it("passes a non-zero exit code through", async () => {
+		const { exitCode } = await run("exit 3");
+		expect(exitCode).toBe(3);
+	});
+
+	it("times out with pi's error string and kills the process", async () => {
+		const started = Date.now();
+		await expect(run("Start-Sleep -Seconds 30", { timeout: 1 })).rejects.toThrow("timeout:1");
+		expect(Date.now() - started).toBeLessThan(10_000);
+	});
+
+	it("aborts with pi's error string", async () => {
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 200);
+		await expect(run("Start-Sleep -Seconds 30", { signal: controller.signal })).rejects.toThrow("aborted");
+	});
+
+	it("refuses a missing working directory with pi's message", async () => {
+		await expect(ops.exec("Write-Output x", "/definitely/not/here", { onData: () => {} })).rejects.toThrow(/Working directory does not exist/);
+	});
+
+	it("formats tables without ANSI colour, as Claude Code's prefix makes it", async () => {
+		const { output } = await run("[pscustomobject]@{ Name = 'a' } | Format-Table");
+		expect(output).toContain("Name");
+		expect(output).not.toContain("\x1b[");
+	});
+
+	it("emits UTF-8 (the prefix pi prepends)", async () => {
+		const { output } = await run("Write-Output 'héllo — ✓'");
+		expect(output).toContain("héllo — ✓");
+	});
+});
+
+function collect(child: ReturnType<typeof spawnShellCommand>): Promise<string> {
+	return new Promise((resolve, reject) => {
+		let out = "";
+		child.stdout?.on("data", (d: Buffer) => (out += d.toString()));
+		child.on("error", reject);
+		child.on("close", () => resolve(out));
+	});
+}
+
+const winPS = windowsPowerShell();
+
+/**
+ * Windows PowerShell 5.1 — the edition every Windows machine has without an
+ * install, and the one Claude Code's description warns the model about (no
+ * `&&`, UTF-16 default). Runs only on Windows (the CI runner has it).
+ */
+describe.skipIf(!winPS)("createPowerShellOperations (Windows PowerShell 5.1, powershell.exe)", { timeout: 60_000 }, () => {
+	const ops = createPowerShellOperations(() => winPS);
+	const run = async (command: string) => {
+		let output = "";
+		const result = await ops.exec(command, process.cwd(), { onData: (d) => (output += d.toString()) });
+		return { ...result, output };
+	};
+
+	it("is the desktop edition by executable name, and in fact", async () => {
+		expect(powerShellEdition(winPS)).toBe("desktop");
+		const { exitCode, output } = await run("Write-Output $PSVersionTable.PSEdition; Write-Output $PSVersionTable.PSVersion.Major");
+		expect(exitCode).toBe(0);
+		expect(output).toContain("Desktop");
+		expect(output).toContain("5");
+	});
+
+	it("emits UTF-8 through pi's prefix, although 5.1 does not default to it", async () => {
+		const { output } = await run("Write-Output 'héllo — ✓'");
+		expect(output).toContain("héllo — ✓");
+	});
+
+	it("has no && chain operator — a parser error, as the description says", async () => {
+		const { exitCode, output } = await run("Write-Output a && Write-Output b");
+		expect(exitCode, output).not.toBe(0);
+		expect(output).toContain("&&");
+	});
+});

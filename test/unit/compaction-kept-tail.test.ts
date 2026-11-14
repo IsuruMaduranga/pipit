@@ -1,0 +1,88 @@
+/**
+ * The kept tail a compaction leaves in context: how many messages stay after
+ * pi's cut point and how the first one opens. One Code's wording of it in the
+ * instruction is profile/test/profile-compaction-text.test.ts.
+ */
+import { describe, expect, it } from "vitest";
+import { keptTailOf } from "../../extensions/context/compaction/index.ts";
+
+const user = (text: string) => ({ role: "user", content: text });
+const assistant = (text = "…") => ({ role: "assistant", content: [{ type: "text", text }] });
+const toolResult = (text = "ran") => ({ role: "toolResult", content: [{ type: "text", text }] });
+
+describe("keptTailOf (C6)", () => {
+	it("counts the messages after pi's cut point and quotes how the first kept one opens", () => {
+		const captured = [user("first"), assistant(), toolResult(), assistant(), user("Now fix the flaky test in auth.spec.ts please"), assistant()];
+		const tail = keptTailOf(captured, {
+			messagesToSummarize: captured.slice(0, 4) as never,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			previousSummary: undefined,
+		});
+		expect(tail).toEqual({ count: 2, landmark: { kind: "opens", text: "Now fix the flaky test in auth.spec.ts please" } });
+	});
+
+	it("accounts for the leading compaction summary and a split turn's prefix", () => {
+		const captured = [{ role: "compactionSummary", summary: "old" }, user("a"), assistant(), toolResult(), assistant(), toolResult("late"), assistant()];
+		const tail = keptTailOf(captured, {
+			messagesToSummarize: [captured[1], captured[2]] as never,
+			turnPrefixMessages: [captured[3], captured[4]] as never,
+			isSplitTurn: true,
+			previousSummary: "old",
+		});
+		expect(tail).toEqual({ count: 2, landmark: { kind: "opens", text: "late" } });
+	});
+
+	it("makes no claim when the captured request does not align with the doomed span", () => {
+		const captured = [user("a"), assistant(), user("b"), assistant()];
+		expect(
+			keptTailOf(captured, { messagesToSummarize: [assistant(), user("x")] as never, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }),
+		).toBeUndefined();
+		expect(
+			keptTailOf(captured, { messagesToSummarize: [] as never, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined }),
+		).toBeUndefined();
+	});
+
+	it("makes no claim on Google when a kept tool result carries an image", () => {
+		const image = { role: "toolResult", toolName: "read", content: [{ type: "image", data: "AA==", mimeType: "image/png" }] };
+		const captured = [user("a"), assistant(), assistant(), image, user("b")];
+		const prep = { messagesToSummarize: captured.slice(0, 2) as never, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined };
+		expect(keptTailOf(captured, prep, "google-generative-ai")).toBeUndefined();
+		// Anthropic keeps an image inside its tool result: the count stands.
+		expect(keptTailOf(captured, prep, "anthropic-messages")?.count).toBe(3);
+	});
+
+	it("shortens a long opening to a single 80-character line", () => {
+		const long = `${"word ".repeat(40)}\nsecond line`;
+		const captured = [user("a"), assistant(), user(long)];
+		const tail = keptTailOf(captured, { messagesToSummarize: captured.slice(0, 2) as never, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined });
+		expect(tail?.count).toBe(1);
+		const quoted = tail?.landmark?.kind === "opens" ? tail.landmark.text : undefined;
+		expect(quoted).toHaveLength(81);
+		expect(quoted?.endsWith("…")).toBe(true);
+		expect(quoted).not.toContain("\n");
+	});
+
+	it("counts a parallel batch's results as one message where the provider merges them", () => {
+		const call = (name: string, args: Record<string, unknown>) => ({ type: "toolCall", id: name, name, arguments: args });
+		const calls = (...blocks: unknown[]) => ({ role: "assistant", content: blocks });
+		const result = (toolName: string) => ({ role: "toolResult", toolName, content: [{ type: "text", text: "ok" }] });
+		const doomed = [user("go"), calls(call("read", { path: "a" }), call("read", { path: "b" }), call("read", { path: "c" })), result("read"), result("read"), result("read")];
+		const kept = [calls(call("read", { path: "src/x.ts" }), call("grep", { pattern: "foo" })), result("read"), result("grep"), assistant("done")];
+		const captured = [...doomed, ...kept];
+		const preparation = { messagesToSummarize: doomed as never, turnPrefixMessages: [], isSplitTurn: false, previousSummary: undefined };
+		// Anthropic sends the two kept results as one user message: three messages stay.
+		expect(keptTailOf(captured, preparation, "anthropic-messages")).toEqual({
+			count: 3,
+			landmark: { kind: "calls", tool: "read", hint: "src/x.ts" },
+		});
+		// Chat Completions sends one message per result.
+		expect(keptTailOf(captured, preparation, "openai-completions")?.count).toBe(4);
+		// A kept tail that opens on a result names the call it answers.
+		const fromResult = keptTailOf([...doomed.slice(0, 2), ...doomed.slice(2)], {
+			...preparation,
+			messagesToSummarize: doomed.slice(0, 2) as never,
+		}, "anthropic-messages");
+		expect(fromResult).toEqual({ count: 1, landmark: { kind: "toolResult", tool: "read" } });
+	});
+});

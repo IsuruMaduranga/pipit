@@ -1,0 +1,169 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFER_CHANNEL, deferredAddendumText, WITHHOLD_CHANNEL } from "../../extensions/lib/request/deferred.ts";
+import { MCP_TOOLS_CHANNEL } from "../../extensions/lib/plugins/mcp-share.ts";
+import { REMINDER_CHANNEL } from "../../extensions/lib/request/reminders.ts";
+import toolSearchExtension from "../../extensions/request/tool-search/index.ts";
+import webExtension from "../../extensions/tools/web/index.ts";
+import { createFakeCtx, createFakePi, renderRequest } from "./helpers/fake-pi.ts";
+import type { Reminder } from "./helpers/tool-search-fake-pi.ts";
+import { toolSearchResultText } from "../../extensions/lib/request/tool-search-text.ts";
+
+const gemini = { provider: "google", api: "google-generative-ai", id: "gemini-test" };
+const other = { provider: "openai", api: "openai-responses", id: "gpt-test" };
+type Model = typeof gemini | undefined;
+type SearchResult = { content: Array<{ text: string }>; details: { matches: string[] }; isError?: boolean };
+
+/** Drive both real extensions, including pi-web-search's active-tool manager. */
+function harness() {
+	const fake = createFakePi();
+	fake.pi.getAllTools = () => [...fake.tools.values()];
+	const reminders: Reminder[] = [];
+	const transitions: Array<{ channel: string; name: string }> = [];
+	fake.events.on(REMINDER_CHANNEL, (data) => reminders.push(data as Reminder));
+	for (const channel of [DEFER_CHANNEL, WITHHOLD_CHANNEL]) {
+		fake.events.on(channel, (data) => transitions.push({ channel, name: (data as { name: string }).name }));
+	}
+	toolSearchExtension(fake.pi as never);
+	webExtension(fake.pi as never);
+	fake.setActiveTools(["read", ...fake.tools.keys()]);
+	// The session's branch holds its own tool_search results, as pi's would: a
+	// /tree switch re-reads the loads from it.
+	const branch: unknown[] = [];
+	const ctx = (model: Model) => createFakeCtx({ model, sessionManager: { getBranch: () => branch } });
+	let call = 0;
+	const search = async (query = "select:url_context") => {
+		const toolCallId = `search-${++call}`;
+		const result = (await fake.tools.get("tool_search")!.execute(toolCallId, { query }, undefined, undefined, ctx(other))) as SearchResult;
+		branch.push({ type: "message", message: { role: "toolResult", toolName: "tool_search", toolCallId, content: result.content, details: result.details } });
+		return result;
+	};
+	return {
+		...fake,
+		reminders,
+		transitions,
+		search,
+		async start(model: Model) {
+			await fake.fire("session_start", {}, ctx(model));
+			fake.events.emit(MCP_TOOLS_CHANNEL, { tools: [], settled: true });
+			await vi.advanceTimersByTimeAsync(150);
+		},
+		async switchModel(event: string, model: Model) {
+			await fake.fire(event, { model }, ctx(model));
+			await vi.advanceTimersByTimeAsync(150);
+		},
+		request: (model: Model) => fake.fire("context", { messages: [] }, ctx(model)),
+		/** Render a request inside an epoch that told `told` deferred tools; the addenda tool-search adds. */
+		render(told: string[], model: Model) {
+			return renderRequest(fake.events, { facts: [{ kind: "tools", names: told }], model }).map((block) => block.text);
+		},
+	};
+}
+
+const listings = (reminders: Reminder[]) => reminders.filter((r) => r.key === "deferred-tools");
+
+describe("url_context model-scoped deferral", () => {
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => vi.useRealTimers());
+
+	for (const event of ["model_select", "session_tree"]) {
+		it(`${event}: withdraws a Gemini tool from search, and the epoch announces nothing about it`, async () => {
+			const fake = harness();
+			await fake.start(gemini);
+			const told = (listings(fake.reminders).at(-1)?.text ?? "").split("\n").slice(1);
+			expect(told).toContain("url_context");
+			expect(fake.getActiveTools()).not.toContain("url_context");
+
+			await fake.switchModel(event, other);
+			const result = await fake.search();
+			expect(result.isError).toBe(true);
+			expect(result.details.matches).toEqual([]);
+			expect(result.content[0].text).toBe(toolSearchResultText.noMatch({ query: "select:url_context", missing: [], withdrawn: ["url_context"], loadable: ["web_search"] }));
+			expect((await fake.search("gemini")).details.matches).not.toContain("url_context");
+			expect(fake.getActiveTools()).not.toContain("url_context");
+			expect(fake.render(told, other)).toEqual([]);
+			// The live listing an epoch would render no longer names it.
+			expect(listings(fake.reminders).at(-1)?.text ?? "").not.toContain("url_context");
+		});
+
+		it(`${event}: announces Gemini as a late arrival when starting elsewhere`, async () => {
+			const fake = harness();
+			await fake.start(other);
+			const told = (listings(fake.reminders).at(-1)?.text ?? "").split("\n").slice(1);
+			expect(told).not.toContain("url_context");
+			expect((await fake.search()).details.matches).toEqual([]);
+
+			await fake.switchModel(event, gemini);
+			expect(fake.getActiveTools()).not.toContain("url_context");
+			expect(fake.render(told, gemini)).toEqual([deferredAddendumText(["url_context"])]);
+			expect((await fake.search()).details.matches).toEqual(["url_context"]);
+			expect(fake.getActiveTools()).toContain("url_context");
+		});
+
+		it(`${event}: withdraws an already loaded tool and explains a direct-call miss`, async () => {
+			const fake = harness();
+			await fake.start(gemini);
+			await fake.search();
+			expect(fake.getActiveTools()).toContain("url_context");
+			await fake.request(gemini);
+
+			await fake.switchModel(event, other);
+			expect(fake.getActiveTools()).not.toContain("url_context");
+			await fake.fire("tool_execution_end", {
+				isError: true,
+				result: { content: [{ type: "text", text: "Tool url_context not found" }] },
+			});
+			const miss = fake.reminders.find((r) => r.key === "deferred-miss-url_context");
+			// Not the ordinary "load it with tool_search" advice.
+			expect(miss?.text).toBe(toolSearchResultText.withheldMiss({ name: "url_context" }));
+			expect((await fake.search()).isError).toBe(true);
+			expect(fake.getActiveTools()).not.toContain("url_context");
+		});
+
+		it(`${event}: a return to Gemini keeps url_context callable while its load is in context, and preserves loads on same-provider events`, async () => {
+			const fake = harness();
+			await fake.start(other);
+			await fake.request(other);
+			for (let cycle = 0; cycle < 3; cycle++) {
+				await fake.switchModel(event, gemini);
+				// The history's tool_search result loaded it in an earlier cycle: it names the tool, so the tool stays declared.
+				if (cycle === 0) expect(fake.getActiveTools()).not.toContain("url_context");
+				else expect(fake.getActiveTools()).toContain("url_context");
+				expect((await fake.search()).details.matches).toEqual(["url_context"]);
+				await fake.switchModel(event, { ...gemini, id: `gemini-${cycle}` });
+				expect(fake.getActiveTools()).toContain("url_context");
+				await fake.switchModel(event, other);
+				expect((await fake.search()).isError).toBe(true);
+				expect(fake.getActiveTools()).not.toContain("url_context");
+			}
+			expect(fake.transitions.filter((t) => t.name === "url_context" && t.channel === DEFER_CHANNEL)).toHaveLength(3);
+			expect(fake.transitions.filter((t) => t.name === "url_context" && t.channel === WITHHOLD_CHANNEL)).toHaveLength(3);
+		});
+	}
+
+	it("handles an unresolved model at startup and withdraws when the model becomes unresolved", async () => {
+		const fake = harness();
+		await fake.start(undefined);
+		expect((await fake.search()).isError).toBe(true);
+		await fake.switchModel("model_select", gemini);
+		expect((await fake.search()).details.matches).toEqual(["url_context"]);
+		await fake.switchModel("session_tree", undefined);
+		expect((await fake.search()).isError).toBe(true);
+		expect(fake.getActiveTools()).not.toContain("url_context");
+	});
+
+	it("matches the vendor's provider-based Gemini gate as well as its API-based gate", async () => {
+		const fake = harness();
+		await fake.start({ provider: "google-generative-ai", api: "custom", id: "gemini-custom" });
+		expect((await fake.search()).details.matches).toEqual(["url_context"]);
+		await fake.switchModel("model_select", other);
+		expect((await fake.search()).isError).toBe(true);
+	});
+
+	it("withdraws before the first request without leaving the tool in the initial listing", async () => {
+		const fake = harness();
+		await fake.start(gemini);
+		await fake.switchModel("model_select", other);
+		expect(listings(fake.reminders).at(-1)?.text).not.toContain("url_context");
+		expect((await fake.search()).isError).toBe(true);
+	});
+});

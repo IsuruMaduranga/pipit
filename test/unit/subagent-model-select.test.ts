@@ -1,0 +1,1046 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import { pinCatalog } from "./catalog-fixture.ts";
+import { tempHome } from "./helpers/temp-home.ts";
+import {
+	applicableSubagentDefault,
+	loadSubagentDefault,
+	persistSubagentModel,
+	type SubagentDefault,
+} from "../../extensions/lib/models/subagent-default.ts";
+import { crossesProvider, supportsImageInput } from "../../extensions/lib/models/model-policy.ts";
+import {
+	expensiveModelGate,
+	resolveSubagentModel,
+	subagentModelMenu,
+	subagentModelNotes,
+	refusedModelNote,
+	subagentModelsReminder,
+	subagentStatusModel,
+} from "../../extensions/lib/models/subagent-model.ts";
+import type { SubagentModelNotice } from "../../extensions/lib/models/subagent-model-text.ts";
+import { envName } from "../../extensions/lib/profile/brand.mjs";
+import { productSettingsPath } from "../../extensions/lib/profile/product-settings.ts";
+import { subagentModelWordsInForce } from "../../extensions/lib/models/subagent-model.ts";
+
+/** The product's own settings file lives under its state dir, not ~/.claude. */
+const writeProductSettings = (home: string, data: unknown) => {
+	mkdirSync(dirname(productSettingsPath(home)), { recursive: true });
+	writeFileSync(productSettingsPath(home), JSON.stringify(data));
+};
+
+/** The profile's subagent-model text. */
+const words = () => subagentModelWordsInForce();
+/** A resolution notice in the profile's words. */
+const notice = (n: SubagentModelNotice) => words().notice(n);
+
+/** Minimal structural stand-in; only provider/id/cost are consulted. */
+const model = (provider: string, id: string, input?: number) =>
+	({ provider, id, name: id, cost: input === undefined ? undefined : { input, output: input * 4 } }) as any;
+
+/** A `subagentModel`-setting default, optionally stamped for the containment it was set on. */
+const setting = (spec: string, setForContainment?: string): SubagentDefault => ({
+	spec,
+	source: "subagentModel setting",
+	...(setForContainment ? { setForContainment } : {}),
+});
+
+const anthropic = [
+	model("anthropic", "claude-opus-4-8", 5),
+	model("anthropic", "claude-sonnet-5-5", 3),
+	model("anthropic", "claude-haiku-4-5", 1),
+	model("anthropic", "claude-haiku-4-5-20251001", 1),
+];
+const openai = [model("openai", "gpt-5.1", 1.25), model("openai", "gpt-5-mini", 0.25)];
+
+// One release date per vendor, so nothing supersedes anything. Anthropic: Opus
+// 4.8 and Sonnet 5.5 frontier by the parity gate, Haiku cheap. OpenAI: the
+// unmarked and codex models workhorse by price, the minis and Luna cheap,
+// nano tiny by name; `gpt-6-zz` and `claude-mystery` are in no catalog.
+beforeEach(() =>
+	pinCatalog([
+		{ id: "anthropic/claude-opus-4-8", released: "2026-09-01", price: [5, 25] },
+		{ id: "anthropic/claude-fable-5", released: "2026-09-01", price: [10, 50] },
+		{ id: "anthropic/claude-sonnet-5-5", released: "2026-09-01", price: [3, 15], servedAs: ["openrouter/anthropic/claude-sonnet-5.5"] },
+		{ id: "anthropic/claude-sonnet-5", released: "2026-09-01", price: [3, 15], servedAs: ["openrouter/anthropic/claude-sonnet-5"] },
+		{
+			id: "anthropic/claude-haiku-4-5",
+			released: "2025-10-15",
+			price: [1, 5],
+			servedAs: ["anthropic/claude-haiku-4-5-20251001", "openrouter/anthropic/claude-haiku-4.5", "openrouter/anthropic/claude-haiku-4.5-0731"],
+		},
+		{ id: "openai/gpt-5.1", released: "2026-09-01", price: [1.25, 10] },
+		{ id: "openai/gpt-5.1-codex", released: "2026-09-01", price: [1, 8] },
+		{ id: "openai/gpt-5.2", released: "2026-09-01", price: [1.75, 14] },
+		{ id: "openai/gpt-5-mini", released: "2026-09-01", price: [0.25, 2] },
+		{ id: "openai/gpt-5.4-mini", released: "2026-09-01", price: [0.3, 1.2] },
+		{ id: "openai/gpt-5-nano", released: "2026-09-01", price: [0.05, 0.4] },
+		{ id: "openai/gpt-5.6-sol", released: "2026-09-01", price: [5, 20] },
+		{ id: "openai/gpt-5.6-terra", released: "2026-09-01", price: [2, 8] },
+		{ id: "openai/gpt-5.6-luna", released: "2026-09-01", price: [0.2, 0.8] },
+		{ id: "openai/gpt-6", released: "2026-09-01", price: [10, 40] },
+		{ id: "openai/gpt-6-codex", released: "2026-09-01", price: [4, 16] },
+		{ id: "openai/gpt-6-mini", released: "2026-09-01", price: [0.4, 1.6] },
+		{ id: "openai/gpt-6-nano", released: "2026-09-01", price: [0.1, 0.4] },
+		{ id: "zhipuai/glm-4.6", released: "2026-09-01", price: [0.5, 2] },
+		{ id: "zhipuai/glm-4.5-air", released: "2026-09-01", price: [0.1, 0.4] },
+		{ id: "zhipuai/glm-4.7", released: "2026-09-01", price: [0.6, 2.2] },
+	]),
+);
+
+describe("resolveSubagentModel: aliases", () => {
+	it("prefers the undated id over a -MMDD snapshot when an alias matches both", () => {
+		// Reverse-lexicographic order alone would pick the "-0731" snapshot; the undated alias must win.
+		const catalog = [
+			model("openrouter", "anthropic/claude-sonnet-5", 3),
+			model("openrouter", "anthropic/claude-haiku-4.5", 1),
+			model("openrouter", "anthropic/claude-haiku-4.5-0731", 1),
+		];
+		const resolution = resolveSubagentModel({ requested: "haiku", sessionModel: catalog[0], available: catalog });
+		expect(resolution.model?.id).toBe("anthropic/claude-haiku-4.5");
+	});
+
+	it("resolves Claude Code aliases within the session's provider, preferring undated ids", () => {
+		const resolution = resolveSubagentModel({
+			requested: "haiku",
+			sessionModel: anthropic[0],
+			available: [...anthropic, ...openai],
+		});
+		expect(resolution.model?.id).toBe("claude-haiku-4-5");
+		expect(resolution.model?.provider).toBe("anthropic");
+		expect(resolution.notices).toEqual([]);
+	});
+
+	it("never stretches an alias across providers — it resolves as its tier in-family instead", () => {
+		// "sonnet" on an openai session names nothing there; picking Anthropic
+		// would silently ship the task (or a fork's whole transcript) elsewhere.
+		// The alias is Claude Code's name for the workhorse tier, so the cheapest
+		// workhorse-class openai model is what it meant here.
+		const resolution = resolveSubagentModel({
+			requested: "sonnet",
+			sessionModel: openai[0],
+			available: [...anthropic, ...openai],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.model?.id).toBe("gpt-5.1");
+		expect(resolution.source).toBe("call");
+		expect(resolution.notices[0]).toBe(notice({ kind: "aliasAsTier", alias: "sonnet", session: "openai/gpt-5.1", resolved: "openai/gpt-5.1" }));
+	});
+
+	it("reads an alias as its tier: sonnet → the cheapest workhorse-class model, haiku → the cheapest capable one", () => {
+		const codex = [
+			model("openai-codex", "gpt-5.6-sol", 5),
+			model("openai-codex", "gpt-5.6-terra", 2),
+			model("openai-codex", "gpt-5.4-mini", 0.75),
+			model("openai-codex", "gpt-5.6-luna", 0.2),
+			model("openai-codex", "gpt-5-nano", 0.05),
+		];
+		const sonnet = resolveSubagentModel({ requested: "sonnet", sessionModel: codex[0], available: codex });
+		expect(sonnet.model?.id).toBe("gpt-5.6-terra");
+		expect(sonnet.source).toBe("call");
+		const haiku = resolveSubagentModel({ requested: "haiku", sessionModel: codex[0], available: codex });
+		expect(haiku.model?.id).toBe("gpt-5.6-luna"); // cheapest capable; nano is tiny and never picked
+		// opus/fable mean the strongest model the user chose on this provider: the session model.
+		expect(resolveSubagentModel({ requested: "opus", sessionModel: codex[1], available: codex }).model?.id).toBe("gpt-5.6-terra");
+		expect(resolveSubagentModel({ requested: "fable", sessionModel: codex[0], available: codex }).model?.id).toBe("gpt-5.6-sol");
+		// A name match still wins over the tier reading on a provider that has one.
+		expect(resolveSubagentModel({ requested: "sonnet", sessionModel: anthropic[0], available: anthropic }).model?.id).toBe("claude-sonnet-5-5");
+	});
+
+	it("stays with the session's model-creator namespace on a gateway", () => {
+		const catalog = [
+			model("openrouter", "openai/gpt-5.1", 1.25),
+			model("openrouter", "openai/gpt-5-mini", 0.25),
+			model("openrouter", "anthropic/claude-haiku-4.5", 1),
+		];
+		const resolution = resolveSubagentModel({ requested: "haiku", sessionModel: catalog[0], available: catalog });
+		// anthropic/claude-haiku-4.5 is same *pi provider* but another vendor; the
+		// alias reads as the cheap tier within the openai namespace instead.
+		expect(resolution.model?.id).toBe("openai/gpt-5-mini");
+		expect(resolution.source).toBe("call");
+	});
+
+	it('treats "inherit" as the session model', () => {
+		const resolution = resolveSubagentModel({
+			requested: "inherit",
+			agentModel: "haiku",
+			sessionModel: anthropic[1],
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+	});
+});
+
+describe("resolveSubagentModel: precedence and exact references", () => {
+	it("prefers per-call over agent frontmatter over the configured default", () => {
+		const input = { sessionModel: anthropic[0], available: [...anthropic, ...openai] };
+		expect(
+			resolveSubagentModel({ ...input, requested: "haiku", agentModel: "sonnet", configuredDefault: setting("opus") }).model?.id,
+		).toBe("claude-haiku-4-5");
+		expect(resolveSubagentModel({ ...input, agentModel: "sonnet", configuredDefault: setting("opus") }).model?.id).toBe(
+			"claude-sonnet-5-5",
+		);
+		expect(resolveSubagentModel({ ...input, configuredDefault: setting("opus") }).model?.id).toBe("claude-opus-4-8");
+	});
+
+	it("honors an exact cross-provider reference, with a notice — naming it is choosing it", () => {
+		const resolution = resolveSubagentModel({
+			requested: "openai/gpt-5-mini",
+			sessionModel: anthropic[0],
+			available: [...anthropic, ...openai],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.notices[0]).toBe(notice({ kind: "otherProviderHonored", model: "openai/gpt-5-mini", session: "anthropic/claude-opus-4-8", source: "call" }));
+	});
+
+	it("fails a bad per-call request with no fallback so the model that wrote it can retry", () => {
+		// No agent model and no configured default → nothing downstream resolves,
+		// so a bad per-call model errors and the model can pick from the menu.
+		const resolution = resolveSubagentModel({
+			requested: "gpt-9000-ultra",
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.unresolved).toBe("gpt-9000-ultra");
+		expect(resolution.model).toBeUndefined();
+	});
+
+	it("falls a bad per-call model through to the agent's configured model, not the session model", () => {
+		// The reported bug: a non-existent per-call model must not skip the agent's
+		// own model and land on the session model — the agent runs on its model.
+		const resolution = resolveSubagentModel({
+			requested: "gpt-9000-ultra",
+			agentModel: "claude-haiku-4-5",
+			sessionModel: anthropic[0], // session is opus; agent's haiku must win over it
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-haiku-4-5");
+		expect(resolution.source).toBe("agent");
+		expect(resolution.unresolved).toBeUndefined();
+		expect(resolution.notices.some((n) => n.includes("gpt-9000-ultra"))).toBe(true);
+	});
+
+	it("falls a bad per-call model through to the configured default when there is no agent model", () => {
+		const resolution = resolveSubagentModel({
+			requested: "gpt-9000-ultra",
+			configuredDefault: setting("haiku"),
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-haiku-4-5");
+		expect(resolution.source).toBe("default");
+		expect(resolution.unresolved).toBeUndefined();
+	});
+
+	it("still errors a bad per-call model when the agent model is also unavailable", () => {
+		const resolution = resolveSubagentModel({
+			requested: "gpt-9000-ultra",
+			agentModel: "also-withdrawn",
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.unresolved).toBe("gpt-9000-ultra");
+		expect(resolution.model).toBeUndefined();
+	});
+
+	it("falls an alias with no model of its class through to the automatic pick, not the session model", () => {
+		// A cheap-tier session on a provider with only cheap-tier models: "sonnet"
+		// names no workhorse-class model there, so the chain continues and the
+		// automatic pick (cheapest at the session's own floor) runs the subagent —
+		// the session model would have been the dearer answer for no reason.
+		const cheapOnly = [model("openai", "gpt-5.4-mini", 0.75), model("openai", "gpt-5-mini", 0.25)];
+		const resolution = resolveSubagentModel({ requested: "sonnet", sessionModel: cheapOnly[0], available: cheapOnly });
+		expect(resolution.model?.id).toBe("gpt-5-mini");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "aliasMissing", alias: "sonnet", session: "openai/gpt-5.4-mini" }));
+		expect(resolution.unresolved).toBeUndefined();
+	});
+
+	it("falls a per-call alias the provider cannot tier through to the agent's model", () => {
+		// An unpriced catalog has nothing the tier reading can rank, so the alias
+		// names nothing; the agent's own valid model must still run rather than
+		// dropping straight to the session model.
+		const unpriced = [model("openai", "gpt-5.1"), model("openai", "gpt-5-mini")];
+		const resolution = resolveSubagentModel({
+			requested: "sonnet",
+			agentModel: "gpt-5-mini",
+			sessionModel: unpriced[0],
+			available: unpriced,
+		});
+		expect(resolution.model?.id).toBe("gpt-5-mini");
+		expect(resolution.source).toBe("agent");
+		expect(resolution.unresolved).toBeUndefined();
+	});
+
+	it("degrades a bad configured default to the automatic same-provider pick with a notice", () => {
+		// A default the user set months ago must not fail every subagent run —
+		// and must not land on the session model, the most expensive answer, when
+		// a cheaper model at the session's floor exists (opus session → sonnet).
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("some/withdrawn-model"),
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "unavailable", wanted: "some/withdrawn-model", source: "default" }));
+	});
+
+	it("falls through a bad agent-frontmatter model to the configured default", () => {
+		const resolution = resolveSubagentModel({
+			agentModel: "some/withdrawn-model",
+			configuredDefault: setting("haiku"),
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-haiku-4-5");
+		expect(resolution.source).toBe("default");
+	});
+
+	it("automatically chooses the cheapest model in the session's tier when nothing is requested", () => {
+		// The classifier's rule, shared: an Opus session delegates to the cheaper
+		// frontier Sonnet, never Haiku (a weak worker spends the saving on retries).
+		const resolution = resolveSubagentModel({ sessionModel: anthropic[0], available: anthropic });
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+		expect(resolution.source).toBe("automatic");
+	});
+
+	it("never picks an experimental build automatically, taking the next cheapest instead", () => {
+		pinCatalog([
+			{ id: "openai/gpt-5.6-sol", released: "2026-09-01", price: [5, 20] },
+			{ id: "openai/gpt-5.6-terra", released: "2026-09-01", price: [2, 8] },
+			{ id: "openai/gpt-5.6-terra-exp", released: "2026-09-01", price: [1.5, 6] },
+		]);
+		const catalog = [model("openai-codex", "gpt-5.6-sol", 5), model("openai-codex", "gpt-5.6-terra", 2), model("openai-codex", "gpt-5.6-terra-exp", 1.5)];
+		const resolution = resolveSubagentModel({ sessionModel: catalog[0], available: catalog });
+		expect(resolution.model?.id).toBe("gpt-5.6-terra");
+		expect(resolution.source).toBe("automatic");
+	});
+
+	it("keeps a Sonnet session's subagents on Sonnet: nothing cheaper is in its tier", () => {
+		const resolution = resolveSubagentModel({ sessionModel: anthropic[1], available: anthropic });
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+		expect(resolution.source).toBe("session");
+	});
+
+	it("uses Terra automatically for a Sol session, never the cheap-line Luna", () => {
+		const catalog = [
+			model("openai-codex", "gpt-5.6-sol", 5),
+			model("openai-codex", "gpt-5.6-terra", 2),
+			model("openai-codex", "gpt-5.6-luna", 0.2),
+			model("openai-codex", "gpt-5.4-mini", 0.75),
+		];
+		const resolution = resolveSubagentModel({ sessionModel: catalog[0], available: catalog });
+		expect(resolution.model?.id).toBe("gpt-5.6-terra");
+		expect(resolution.source).toBe("automatic");
+		// Without a cheaper workhorse the session model itself delegates.
+		const noTerra = catalog.filter((m) => m.id !== "gpt-5.6-terra");
+		expect(resolveSubagentModel({ sessionModel: noTerra[0], available: noTerra })).toMatchObject({ model: { id: "gpt-5.6-sol" }, source: "session" });
+	});
+
+	it("never selects automatically without price evidence on both sides", () => {
+		// An unpriced catalog gives no proof of saving, and the anthropic profile
+		// starts at sonnet-class — trusting its order would silently *upgrade*
+		// a haiku session. Automatic selection is a cost optimisation only.
+		const unpriced = [model("anthropic", "claude-haiku-4-5"), model("anthropic", "claude-sonnet-5")];
+		const fromHaiku = resolveSubagentModel({ sessionModel: unpriced[0], available: unpriced });
+		expect(fromHaiku.model?.id).toBe("claude-haiku-4-5");
+		expect(fromHaiku.source).toBe("session");
+
+		const mixed = [model("anthropic", "claude-haiku-4-5", 1), model("anthropic", "claude-sonnet-5")];
+		const unpricedCandidate = resolveSubagentModel({ sessionModel: mixed[0], available: mixed });
+		expect(unpricedCandidate.source).toBe("session");
+	});
+
+	it("holds the automatic pick to the session's tier", () => {
+		// Raw cheapest would pick the uncatalogued $0.05 model or the nano; the
+		// session's workhorse tier excludes the mini too, so the cheaper
+		// workhorse sibling is the worker.
+		const catalog = [
+			model("openai", "gpt-6", 10),
+			model("openai", "gpt-6-codex", 4),
+			model("openai", "gpt-6-mini", 1),
+			model("openai", "gpt-6-nano", 0.1),
+			model("openai", "gpt-6-zz", 0.05),
+		];
+		const resolution = resolveSubagentModel({ sessionModel: catalog[0], available: catalog });
+		expect(resolution.model?.id).toBe("gpt-6-codex");
+		expect(resolution.source).toBe("automatic");
+	});
+
+	it("falls back to the automatic same-provider pick after an explicit agent-frontmatter choice fails", () => {
+		// The agent author asked for a model that is gone. The session model is no
+		// better described than the automatic pick, and it is the dearer of the two.
+		const resolution = resolveSubagentModel({
+			agentModel: "some/withdrawn-model",
+			sessionModel: anthropic[0],
+			available: anthropic,
+		});
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "unavailable", wanted: "some/withdrawn-model", source: "agent" }));
+	});
+});
+
+describe("resolveSubagentModel: the model pairing table", () => {
+	it("takes the table's pick, or its 'session', ahead of the cost algorithm; a setting still wins", () => {
+		// Opus 4.8 pairs with Sonnet 5.5 although Haiku 4.5 is cheaper.
+		expect(resolveSubagentModel({ sessionModel: anthropic[0], available: anthropic })).toMatchObject({ source: "automatic", model: { id: "claude-sonnet-5-5" } });
+		// GPT-6 Luna sessions keep their own model; the cost algorithm would pick a cheaper one.
+		pinCatalog([
+			{ id: "openai/gpt-6-luna", released: "2026-09-22", price: [0.1, 0.5] },
+			{ id: "openai/gpt-6-nano", released: "2026-09-22", price: [0.05, 0.4] },
+			{ id: "openai/gpt-5-mini", released: "2026-09-01", price: [0.08, 0.4] },
+		]);
+		const luna = model("openai", "gpt-6-luna", 0.1);
+		expect(resolveSubagentModel({ sessionModel: luna, available: [luna, model("openai", "gpt-5-mini", 0.08)] })).toMatchObject({ source: "session", model: luna });
+		expect(resolveSubagentModel({ sessionModel: anthropic[0], available: anthropic, configuredDefault: setting("claude-haiku-4-5") }).model?.id).toBe("claude-haiku-4-5");
+	});
+});
+
+describe("resolveSubagentModel: agent-file provider containment", () => {
+	// gpt-5.1-codex: the cheaper workhorse sibling the automatic pick lands on.
+	const openaiCatalog = [model("openai", "gpt-5.1", 1.25), model("openai", "gpt-5-mini", 0.25), model("openai", "gpt-5.1-codex", 1)];
+
+	it("does not honor a cross-provider agent-file model on a non-Claude session", () => {
+		// A .claude/agents file naming an Anthropic model on an OpenAI session:
+		// the fork inherits the transcript, so it stays on-provider. Automatic
+		// same-provider selection serves instead.
+		const resolution = resolveSubagentModel({
+			agentModel: "anthropic/claude-haiku-4-5",
+			sessionModel: openaiCatalog[0],
+			available: [...openaiCatalog, ...anthropic],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.model?.id).toBe("gpt-5.1-codex");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "agentOtherProvider", model: "anthropic/claude-haiku-4-5", session: "openai/gpt-5.1" }));
+	});
+
+	it("honors a cross-provider agent-file model on a Claude session", () => {
+		// On a Claude-family session, .claude/agents conventions are respected;
+		// crossing providers is announced, not blocked.
+		const resolution = resolveSubagentModel({
+			agentModel: "openai/gpt-5-mini",
+			sessionModel: anthropic[0],
+			available: [...anthropic, ...openaiCatalog],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.source).toBe("agent");
+		expect(resolution.notices[0]).toBe(notice({ kind: "otherProviderHonored", model: "openai/gpt-5-mini", session: "anthropic/claude-opus-4-8", source: "agent" }));
+	});
+
+	it("honors a cross-provider setting deliberately set on this session (stamp matches)", () => {
+		// Stamped for the current provider = the user chose it while here: honored + announced.
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("anthropic/claude-haiku-4-5", "openai"), // stamp == session provider
+			sessionModel: openaiCatalog[0],
+			available: [...openaiCatalog, ...anthropic],
+		});
+		expect(resolution.model?.provider).toBe("anthropic");
+		expect(resolution.source).toBe("default");
+		expect(resolution.notices[0]).toBe(notice({ kind: "otherProviderHonored", model: "anthropic/claude-haiku-4-5", session: "openai/gpt-5.1", source: "default" }));
+	});
+
+	it("overrides a stale cross-provider setting (stamped for a provider since left)", () => {
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("anthropic/claude-haiku-4-5", "anthropic"), // stamped for a provider since left
+			sessionModel: openaiCatalog[0],
+			available: [...openaiCatalog, ...anthropic],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "staleDefault", model: "anthropic/claude-haiku-4-5", session: "openai/gpt-5.1" }));
+	});
+
+	it("treats a hand-edited (unstamped) cross-provider setting as stale", () => {
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("anthropic/claude-haiku-4-5"), // unstamped, hand-edited settings.json
+			sessionModel: openaiCatalog[0],
+			available: [...openaiCatalog, ...anthropic],
+		});
+		expect(resolution.model?.provider).toBe("openai");
+		expect(resolution.source).toBe("automatic");
+		expect(resolution.notices[0]).toBe(notice({ kind: "staleDefault", model: "anthropic/claude-haiku-4-5", session: "openai/gpt-5.1" }));
+	});
+
+	it("honors a same-provider setting regardless of stamp (no crossing to override)", () => {
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("openai/gpt-5-mini"), // unstamped, but same provider → not stale-relevant
+			sessionModel: openaiCatalog[0],
+			available: openaiCatalog,
+		});
+		expect(resolution.model?.id).toBe("gpt-5-mini");
+		expect(resolution.source).toBe("default");
+		expect(resolution.notices).toEqual([]);
+	});
+
+	it("detects a cross-vendor gateway setting as stale by containment, not just provider", () => {
+		// On openrouter, two models share provider "openrouter" but differ by vendor
+		// route — crossesProvider treats that as a crossing. A setting stamped on the
+		// openai route (containment openrouter:author:openai) must read as stale on the
+		// z-ai route, even though the plain provider string matches on both.
+		const gateway = [
+			model("openrouter", "openai/gpt-5-mini", 0.25),
+			model("openrouter", "anthropic/claude-haiku-4.5", 1),
+			model("openrouter", "z-ai/glm-4.6", 0.5),
+		];
+		const resolution = resolveSubagentModel({
+			configuredDefault: setting("openrouter/anthropic/claude-haiku-4.5", "openrouter:author:openai"),
+			sessionModel: gateway[2], // z-ai route
+			available: gateway,
+		});
+		expect(resolution.model?.id).toBe("z-ai/glm-4.6"); // same-vendor, not the anthropic setting
+		expect(resolution.source).not.toBe("default");
+		expect(resolution.notices[0]).toBe(notice({ kind: "staleDefault", model: "openrouter/anthropic/claude-haiku-4.5", session: "openrouter/z-ai/glm-4.6" }));
+	});
+});
+
+describe("subagentModelsReminder: setting override notice", () => {
+	const openaiCatalog = [model("openai", "gpt-5.1", 1.25), model("openai", "gpt-5-mini", 0.25)];
+
+	it("informs the model when the user pinned a cross-provider default via the setting", () => {
+		const reminder = subagentModelsReminder({
+			available: [...openaiCatalog, ...anthropic],
+			sessionModel: openaiCatalog[0],
+			defaultModel: anthropic[2], // claude-haiku-4-5
+			defaultSource: "default",
+			configured: { spec: "anthropic/claude-haiku-4-5", source: "subagentModel setting" },
+		});
+		expect(reminder).toBe(
+			words().menu({
+				lines: [
+					words().menuLine({ model: "anthropic/claude-haiku-4-5", price: 1, label: "configuredDefault" }),
+					words().menuLine({ model: "openai/gpt-5.1", price: 1.25, label: "session" }),
+					words().menuLine({ model: "openai/gpt-5-mini", price: 0.25, label: "cheaper" }),
+				],
+				notes: [words().settingPinned({ model: "anthropic/claude-haiku-4-5", otherProvider: "openai/gpt-5.1" })],
+			}),
+		);
+	});
+
+	it("informs without a cross-provider note when the pinned default is same-provider", () => {
+		const reminder = subagentModelsReminder({
+			available: openaiCatalog,
+			sessionModel: openaiCatalog[0],
+			defaultModel: openaiCatalog[1], // gpt-5-mini
+			defaultSource: "default",
+			configured: { spec: "openai/gpt-5-mini", source: "subagentModel setting" },
+		});
+		expect(reminder).toBe(
+			words().menu({
+				lines: [
+					words().menuLine({ model: "openai/gpt-5-mini", price: 0.25, label: "configuredDefault" }),
+					words().menuLine({ model: "openai/gpt-5.1", price: 1.25, label: "session" }),
+				],
+				notes: [words().settingPinned({ model: "openai/gpt-5-mini" })],
+			}),
+		);
+	});
+
+	it("stays silent when a stale setting was overridden (default is not the setting)", () => {
+		// Overridden → defaultSource is automatic/session, not "default"; the
+		// user-facing 'set for a different provider' warning covers it instead.
+		const reminder = subagentModelsReminder({
+			available: [...openaiCatalog, ...anthropic],
+			sessionModel: openaiCatalog[0],
+			defaultModel: openaiCatalog[1], // same-provider automatic pick
+			defaultSource: "automatic",
+			configured: { spec: "anthropic/claude-haiku-4-5", source: "subagentModel setting" },
+		});
+		expect(reminder).not.toContain("pinned the subagent default");
+	});
+
+	it("stays silent for the env var and for the automatic default", () => {
+		const base = {
+			available: [...openaiCatalog, ...anthropic],
+			sessionModel: anthropic[0],
+			defaultModel: anthropic[2],
+			defaultSource: "default" as const,
+		};
+		expect(
+			subagentModelsReminder({ ...base, configured: { spec: "sonnet", source: "env", envVar: "CLAUDE_CODE_SUBAGENT_MODEL", borrowed: true } }),
+		).not.toContain("pinned the subagent default");
+		expect(subagentModelsReminder(base)).not.toContain("pinned the subagent default");
+	});
+});
+
+describe("expensiveModelGate", () => {
+	const session = anthropic[2]; // haiku, $1/M
+	const resolveCall = (requested: string) =>
+		resolveSubagentModel({ requested, sessionModel: session, available: anthropic });
+
+	it("gates a per-call model that outprices the session model", () => {
+		const gate = expensiveModelGate(resolveCall("anthropic/claude-opus-4-8"), session, undefined);
+		expect(gate).toBe(words().costsMore({ model: "anthropic/claude-opus-4-8", price: 5, session: "anthropic/claude-haiku-4-5", sessionPrice: 1 }));
+	});
+
+	it("opens for allow_expensive, equal or cheaper prices, and unpriced models", () => {
+		expect(expensiveModelGate(resolveCall("anthropic/claude-opus-4-8"), session, true)).toBeUndefined();
+		expect(expensiveModelGate(resolveCall("anthropic/claude-haiku-4-5"), session, undefined)).toBeUndefined();
+		const unpriced = [model("anthropic", "claude-haiku-4-5", 1), model("anthropic", "claude-mystery")];
+		const resolution = resolveSubagentModel({
+			requested: "anthropic/claude-mystery",
+			sessionModel: unpriced[0],
+			available: unpriced,
+		});
+		// A gate that fails closed on an unpriced catalog blocks the feature.
+		expect(expensiveModelGate(resolution, unpriced[0], undefined)).toBeUndefined();
+	});
+
+	it("never gates user knobs — only the per-call field is model-chosen", () => {
+		const configured = resolveSubagentModel({
+			configuredDefault: setting("anthropic/claude-opus-4-8"),
+			sessionModel: session,
+			available: anthropic,
+		});
+		expect(configured.source).toBe("default");
+		expect(expensiveModelGate(configured, session, undefined)).toBeUndefined();
+		const fromAgent = resolveSubagentModel({
+			agentModel: "anthropic/claude-opus-4-8",
+			sessionModel: session,
+			available: anthropic,
+		});
+		expect(fromAgent.source).toBe("agent");
+		expect(expensiveModelGate(fromAgent, session, undefined)).toBeUndefined();
+	});
+});
+
+describe("crossesProvider", () => {
+	it("catches provider changes and, on gateways, vendor changes", () => {
+		expect(crossesProvider(openai[0], anthropic[0])).toBe(true);
+		expect(crossesProvider(anthropic[2], anthropic[0])).toBe(false);
+		const gwOpenai = model("openrouter", "openai/gpt-5-mini", 0.25);
+		const gwAnthropic = model("openrouter", "anthropic/claude-haiku-4.5", 1);
+		expect(crossesProvider(gwAnthropic, gwOpenai)).toBe(true);
+		expect(crossesProvider(gwOpenai, gwOpenai)).toBe(false);
+	});
+});
+
+describe("subagentModelMenu", () => {
+	it("lists the default, the session model, and cheaper same-provider options with prices", () => {
+		const menu = subagentModelMenu({
+			available: [...anthropic, ...openai],
+			sessionModel: anthropic[0],
+			defaultModel: anthropic[0],
+		});
+		const text = menu.join("\n");
+		expect(menu[0]).toBe(words().menuLine({ model: "anthropic/claude-opus-4-8", price: 5, label: "sessionDefault" }));
+		expect(menu).toContain(words().menuLine({ model: "anthropic/claude-haiku-4-5", price: 1, label: "cheaper" }));
+		// Contained: no cross-provider entries, and the dated haiku duplicate is collapsed.
+		expect(text).not.toContain("openai/");
+		expect(text).not.toContain("20251001");
+	});
+
+	it("omits text-only cheaper options when requireImageInput is set", () => {
+		const withInput = (id: string, cost: number, input: string[]) =>
+			({ provider: "openai", id, name: id, cost: { input: cost, output: cost * 4 }, input }) as any;
+		// Image session; the cheaper same-provider pool holds one image-capable and
+		// one text-only model. A text-only entry would only be refused on retry.
+		const session = withInput("gpt-5-main", 2, ["text", "image"]);
+		const imageCheap = withInput("gpt-5-vision-mini", 0.7, ["text", "image"]);
+		const textCheap = withInput("gpt-5-text-mini", 0.3, ["text"]);
+		const catalog = [session, imageCheap, textCheap];
+		const gated = subagentModelMenu({ available: catalog, sessionModel: session, defaultModel: session, requireImageInput: true }).join("\n");
+		expect(gated).toContain("gpt-5-vision-mini");
+		expect(gated).not.toContain("gpt-5-text-mini");
+		// Ungated (a text session), the same catalog still lists the text-only model.
+		const ungated = subagentModelMenu({ available: catalog, sessionModel: session, defaultModel: session }).join("\n");
+		expect(ungated).toContain("gpt-5-text-mini");
+	});
+
+	it("stays small on a gateway catalog and keeps to the session's vendor", () => {
+		const catalog = [
+			model("openrouter", "z-ai/glm-4.6", 0.5),
+			model("openrouter", "z-ai/glm-4.5-air", 0.1),
+			model("openrouter", "z-ai/glm-4.6:free", 0),
+			model("openrouter", "z-ai/glm-4.6:batch", 0.25),
+			model("openrouter", "openrouter/auto"),
+			...Array.from({ length: 50 }, (_v, i) => model("openrouter", `openai/model-${i}`, 0.2)),
+		];
+		const menu = subagentModelMenu({ available: catalog, sessionModel: catalog[0], defaultModel: catalog[0] });
+		expect(menu.length).toBeLessThanOrEqual(5);
+		const text = menu.join("\n");
+		expect(text).toContain("z-ai/glm-4.5-air");
+		expect(text).not.toContain(":free");
+		expect(text).not.toContain(":batch");
+		expect(text).not.toContain("openai/model-");
+	});
+
+	it("frames the menu lines in the profile's reminder", () => {
+		const reminder = subagentModelsReminder({ available: anthropic, sessionModel: anthropic[0] });
+		expect(reminder).toBe(
+			words().menu({
+				lines: [
+					words().menuLine({ model: "anthropic/claude-opus-4-8", price: 5, label: "session" }),
+					words().menuLine({ model: "anthropic/claude-haiku-4-5", price: 1, label: "cheaper" }),
+					words().menuLine({ model: "anthropic/claude-sonnet-5-5", price: 3, label: "cheaper" }),
+				],
+				notes: [],
+			}),
+		);
+	});
+
+	it("warns when the configured default costs more than the session model", () => {
+		// haiku session, opus default — a deliberate cheap-driver/strong-worker
+		// setup, so the line informs; it does not tell the model to override.
+		const reminder = subagentModelsReminder({
+			available: anthropic,
+			sessionModel: anthropic[2],
+			defaultModel: anthropic[0],
+			defaultSource: "default",
+		});
+		expect(reminder).toBe(
+			words().menu({
+				lines: [
+					words().menuLine({ model: "anthropic/claude-opus-4-8", price: 5, label: "configuredDefault" }),
+					words().menuLine({ model: "anthropic/claude-haiku-4-5", price: 1, label: "session" }),
+				],
+				notes: [words().defaultCostsMore({ price: 5, sessionPrice: 1 })],
+			}),
+		);
+	});
+
+	it("does not warn when the default is cheaper, equal, or unpriced", () => {
+		const cheaper = subagentModelsReminder({
+			available: anthropic,
+			sessionModel: anthropic[0],
+			defaultModel: anthropic[2],
+			defaultSource: "default",
+		});
+		expect(cheaper).not.toContain("costs more");
+		const unpriced = subagentModelsReminder({
+			available: anthropic,
+			sessionModel: anthropic[0],
+			defaultModel: model("anthropic", "claude-mystery"),
+			defaultSource: "default",
+		});
+		expect(unpriced).not.toContain("costs more");
+	});
+});
+
+describe("loadSubagentDefault", () => {
+	// Claude Code's spelling of the knob, read from its own settings file, is
+	// One Code's provider's: its tests are in profile/test/.
+	const OWN = envName("SUBAGENT_MODEL");
+	let home: string;
+
+	beforeEach(() => {
+		home = tempHome("cc-subagent-default-").home;
+	});
+
+	it("reads the product's variable from its settings env block", () => {
+		writeProductSettings(home, { env: { [OWN]: "sonnet" } });
+		expect(loadSubagentDefault(home, {})).toEqual({ spec: "sonnet", source: "env", envVar: OWN, borrowed: false });
+	});
+
+	it("lets the real environment override the settings env block", () => {
+		writeProductSettings(home, { env: { [OWN]: "sonnet" } });
+		expect(loadSubagentDefault(home, { [OWN]: "haiku" })?.spec).toBe("haiku");
+	});
+
+	it("prefers the explicit subagentModel setting over the env var", () => {
+		writeProductSettings(home, { subagentModel: "anthropic/claude-haiku-4-5", env: { [OWN]: "sonnet" } });
+		const result = loadSubagentDefault(home, { [OWN]: "opus" });
+		expect(result?.spec).toBe("anthropic/claude-haiku-4-5");
+		expect(result?.source).toBe("subagentModel setting");
+	});
+
+	it("returns undefined when nothing is configured", () => {
+		expect(loadSubagentDefault(home, {})).toBeUndefined();
+	});
+});
+
+describe("applicableSubagentDefault", () => {
+	const setting = { spec: "openai/gpt-5-mini", source: "subagentModel setting" } as const;
+	const envVar = { spec: "sonnet", source: "env", envVar: "CLAUDE_CODE_SUBAGENT_MODEL", borrowed: true } as const;
+
+	it("applies One Code's own setting on any provider", () => {
+		expect(applicableSubagentDefault(setting, openai[0])).toBe(setting);
+		expect(applicableSubagentDefault(setting, anthropic[0])).toBe(setting);
+	});
+
+	it("applies the product's own variable on any model", () => {
+		const own = { spec: "gpt-6-mini", source: "env", envVar: envName("SUBAGENT_MODEL"), borrowed: false } as const;
+		expect(applicableSubagentDefault(own, openai[0])).toBe(own);
+		expect(applicableSubagentDefault(own, anthropic[0])).toBe(own);
+	});
+
+	it("passes through when nothing is configured or there is no session model", () => {
+		expect(applicableSubagentDefault(undefined, openai[0])).toBeUndefined();
+		expect(applicableSubagentDefault(envVar, undefined)).toBe(envVar);
+	});
+});
+
+describe("subagentStatusModel", () => {
+	const setting = { source: "subagentModel setting" } as const;
+	const envVar = { source: "env", envVar: "CLAUDE_CODE_SUBAGENT_MODEL", borrowed: true } as const;
+
+	it("shows a configured default with its knob, even when it equals the session model", () => {
+		// A user who just ran /subagent must see their choice land in the banner;
+		// hiding it because it happens to match the session reads as "not saved".
+		expect(subagentStatusModel(setting, { model: anthropic[1], source: "default" })).toEqual({
+			model: "anthropic/claude-sonnet-5-5",
+			via: "setting",
+		});
+		expect(subagentStatusModel(envVar, { model: anthropic[2], source: "default" })).toEqual({
+			model: "anthropic/claude-haiku-4-5",
+			via: "env",
+		});
+	});
+
+	it("shows the session model as such for unset, inherit, and degraded defaults", () => {
+		// After /subagent clear the slot going blank read as breakage; and the
+		// tag follows the resolution, so a default that could not resolve reads
+		// "session" — what actually runs — not the knob that failed.
+		expect(subagentStatusModel(undefined, { model: openai[0], source: "session" })).toEqual({
+			model: "openai/gpt-5.1",
+			via: "session",
+		});
+		expect(subagentStatusModel(setting, { model: openai[0], source: "session" })).toEqual({
+			model: "openai/gpt-5.1",
+			via: "session",
+		});
+	});
+
+	it("labels an automatic role-profile default distinctly", () => {
+		expect(subagentStatusModel(undefined, { model: openai[1], source: "automatic" })).toEqual({
+			model: "openai/gpt-5-mini",
+			via: "auto",
+		});
+	});
+
+	it("shows nothing only when nothing resolves at all", () => {
+		expect(subagentStatusModel(setting, { model: undefined, source: "session" })).toEqual({});
+	});
+});
+
+describe("persistSubagentModel", () => {
+	let home: string;
+
+	beforeEach(() => {
+		home = tempHome("cc-subagent-persist-").home;
+		mkdirSync(dirname(productSettingsPath(home)), { recursive: true });
+	});
+
+	// persistSubagentModel writes to the product's own file, never into ~/.claude.
+	const settingsPath = () => productSettingsPath(home);
+	const readSettings = () => JSON.parse(readFileSync(settingsPath(), "utf-8"));
+
+	it("creates the settings file when there is none", () => {
+		rmSync(dirname(productSettingsPath(home)), { recursive: true, force: true });
+		persistSubagentModel("openai/gpt-5-mini", home);
+		expect(readSettings()).toEqual({ subagentModel: "openai/gpt-5-mini" });
+	});
+
+	it("preserves unrelated keys", () => {
+		writeFileSync(
+			settingsPath(),
+			JSON.stringify({ env: { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" }, permissions: { allow: ["Bash(npm test:*)"] } }),
+		);
+		persistSubagentModel("anthropic/claude-haiku-4-5", home);
+		expect(readSettings()).toEqual({
+			env: { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" },
+			permissions: { allow: ["Bash(npm test:*)"] },
+			subagentModel: "anthropic/claude-haiku-4-5",
+		});
+	});
+
+	it("wins over the env var once saved, and round-trips through the loader", () => {
+		writeFileSync(settingsPath(), JSON.stringify({ env: { CLAUDE_CODE_SUBAGENT_MODEL: "sonnet" } }));
+		persistSubagentModel("inherit", home);
+		expect(loadSubagentDefault(home, {})).toEqual({ spec: "inherit", source: "subagentModel setting" });
+	});
+
+	it("stamps the session containment and round-trips it as setForContainment", () => {
+		persistSubagentModel("opencode/deepseek-v4-flash-free", home, "openai-codex");
+		expect(readSettings()).toEqual({
+			subagentModel: "opencode/deepseek-v4-flash-free",
+			subagentModelSetFor: "openai-codex",
+		});
+		expect(loadSubagentDefault(home, {})).toEqual({
+			spec: "opencode/deepseek-v4-flash-free",
+			source: "subagentModel setting",
+			setForContainment: "openai-codex",
+		});
+	});
+
+	it("does not stamp inherit, and clears a prior stamp on clear", () => {
+		persistSubagentModel("inherit", home, "openai-codex");
+		expect(readSettings()).toEqual({ subagentModel: "inherit" });
+		persistSubagentModel("anthropic/claude-haiku-4-5", home, "anthropic");
+		persistSubagentModel(undefined, home);
+		expect(readSettings()).toEqual({});
+	});
+
+	it("removes the setting on clear", () => {
+		writeFileSync(settingsPath(), JSON.stringify({ subagentModel: "openai/gpt-5-mini" }));
+		persistSubagentModel(undefined, home);
+		expect(readSettings()).toEqual({});
+	});
+
+	it("refuses to clobber a malformed settings file", () => {
+		// A lenient read merely skips a setting; a lenient write would replace
+		// the user's whole settings file with only ours.
+		writeFileSync(settingsPath(), "{not json");
+		expect(() => persistSubagentModel("openai/gpt-5-mini", home)).toThrow();
+		expect(readFileSync(settingsPath(), "utf-8")).toBe("{not json");
+	});
+});
+
+describe("resolveSubagentModel: the alias notice scopes its claim", () => {
+	const catalog = [...anthropic, ...openai];
+
+	// The wording of these claims is One Code's, checked in profile/test/.
+	it("hands the profile the session's model and what the alias resolved to", () => {
+		const resolution = resolveSubagentModel({ requested: "sonnet", sessionModel: openai[0], available: catalog });
+		expect(resolution.notices[0]).toBe(notice({ kind: "aliasAsTier", alias: "sonnet", session: "openai/gpt-5.1", resolved: "openai/gpt-5.1" }));
+	});
+
+	it("hands it no session when there is no session model", () => {
+		const resolution = resolveSubagentModel({ requested: "sonnet", available: [] });
+		expect(resolution.notices[0]).toBe(notice({ kind: "aliasMissing", alias: "sonnet" }));
+	});
+
+	it("no longer narrates the fallback chain, whatever asked", () => {
+		// Which knob MIGHT serve next was worth saying only while nothing said
+		// which one did; subagentModelNotes now names the one that did. So the
+		// notice is the same sentence from all three sources.
+		const fromCall = resolveSubagentModel({ requested: "sonnet", sessionModel: openai[0], available: catalog });
+		const fromAgent = resolveSubagentModel({ agentModel: "sonnet", sessionModel: openai[0], available: catalog });
+		const fromDefault = resolveSubagentModel({
+			configuredDefault: setting("sonnet"),
+			sessionModel: openai[0],
+			available: catalog,
+		});
+		for (const resolution of [fromCall, fromAgent, fromDefault]) {
+			expect(resolution.model?.id).toBe("gpt-5.1");
+			expect(resolution.notices[0]).not.toContain("falling back");
+			expect(resolution.notices[0]).not.toContain("serves");
+		}
+		expect(fromAgent.notices[0]).toBe(fromCall.notices[0]);
+		expect(fromDefault.notices[0]).toBe(fromCall.notices[0]);
+	});
+});
+
+describe("subagentModelNotes: the model is told what its child actually runs on", () => {
+	const catalog = [...anthropic, ...openai];
+
+	it("says nothing when the requested model resolved exactly", () => {
+		const resolution = resolveSubagentModel({ requested: "haiku", sessionModel: anthropic[0], available: catalog });
+		expect(subagentModelNotes(resolution)).toEqual([]);
+	});
+
+	it("names the model an unmatched alias landed on, and where it came from", () => {
+		// The L4 case: a global "use sonnet for subagents" memory, a session on
+		// another provider. The notice alone says only what was NOT used.
+		const resolution = resolveSubagentModel({ requested: "sonnet", sessionModel: openai[0], available: catalog });
+		const notes = subagentModelNotes(resolution);
+		expect(notes).toHaveLength(2);
+		expect(notes[0]).toBe(notice({ kind: "aliasAsTier", alias: "sonnet", session: "openai/gpt-5.1", resolved: "openai/gpt-5.1" }));
+		expect(notes[1]).toBe(words().runsOn({ model: "openai/gpt-5.1", source: "call" }));
+	});
+
+	it("names the agent's own model when that is what served", () => {
+		// The per-call model failed and the agent file's model carried the run: the
+		// source is the question the answer raises, so it is stated rather than guessed.
+		const resolution = resolveSubagentModel({
+			requested: "gpt-9000-ultra",
+			agentModel: "openai/gpt-5-mini",
+			sessionModel: openai[0],
+			available: catalog,
+		});
+		expect(subagentModelNotes(resolution).at(-1)).toBe(words().runsOn({ model: "openai/gpt-5-mini", source: "agent" }));
+	});
+
+	it("states the model even when a notice already mentions that spec", () => {
+		// An honored crossing names the model it honored, but the alias notice
+		// names the SESSION model in the same position — so the answer is always
+		// spelled out rather than left to be inferred from a mention.
+		const resolution = resolveSubagentModel({
+			requested: "anthropic/claude-sonnet-5-5",
+			sessionModel: openai[0],
+			available: catalog,
+		});
+		expect(resolution.model?.id).toBe("claude-sonnet-5-5");
+		expect(subagentModelNotes(resolution).at(-1)).toBe(words().runsOn({ model: "anthropic/claude-sonnet-5-5", source: "call" }));
+	});
+
+	it("adds no claim when nothing resolved at all", () => {
+		const resolution = resolveSubagentModel({ requested: "sonnet", available: [] });
+		expect(resolution.model).toBeUndefined();
+		expect(subagentModelNotes(resolution)).toEqual(resolution.notices);
+	});
+});
+
+describe("resolveSubagentModel — image modality gate", () => {
+	// The session is workhorse and image-capable; both flash rows are cheap.
+	beforeEach(() =>
+		pinCatalog([
+			{ id: "openai/gpt-5-main", released: "2026-09-01", price: [2, 8] },
+			{ id: "openai/gpt-5-big", released: "2026-09-01", price: [3, 12] },
+			{ id: "openai/gpt-5-flash-text", released: "2026-09-01", price: [0.2, 0.8] },
+			{ id: "openai/gpt-5-flash-vision", released: "2026-09-01", price: [0.25, 1] },
+		]),
+	);
+	const withInput = (id: string, cost: number, input: string[]) =>
+		({ provider: "openai", id, name: id, cost: { input: cost, output: cost * 4 }, input }) as any;
+	const session = withInput("gpt-5-main", 2, ["text", "image"]);
+	const textOnly = withInput("gpt-5-flash-text", 0.6, ["text"]);
+	const imageCheap = withInput("gpt-5-flash-vision", 0.7, ["text", "image"]);
+	const available = [session, textOnly, imageCheap];
+
+	it("sanity: the session is image-capable, the cheap flash is text-only", () => {
+		expect(supportsImageInput(session)).toBe(true);
+		expect(supportsImageInput(textOnly)).toBe(false);
+	});
+
+	it("hard-blocks a per-call text-only model, naming the reason for the retry", () => {
+		const r = resolveSubagentModel({ requested: "openai/gpt-5-flash-text", sessionModel: session, available, requireImageInput: true });
+		expect(r.unresolved).toBe("openai/gpt-5-flash-text");
+		expect(r.unresolvedReason).toBe(notice({ kind: "textOnlyCall", model: "openai/gpt-5-flash-text" }));
+		expect(r.notices).toContain(r.unresolvedReason);
+	});
+
+	it("does NOT gate when requireImageInput is unset (no regression, text session)", () => {
+		const r = resolveSubagentModel({ requested: "openai/gpt-5-flash-text", sessionModel: session, available });
+		expect(r.model?.id).toBe("gpt-5-flash-text");
+		expect(r.unresolved).toBeUndefined();
+	});
+
+	it("upgrades a text-only agent-file model to an image-capable model with a notice", () => {
+		const r = resolveSubagentModel({ agentModel: "openai/gpt-5-flash-text", sessionModel: session, available, requireImageInput: true });
+		expect(r.source).not.toBe("agent");
+		expect(r.model && supportsImageInput(r.model)).toBe(true);
+		expect(r.notices).toContain(notice({ kind: "textOnly", model: "openai/gpt-5-flash-text", source: "agent" }));
+	});
+
+	it("upgrades a text-only configured default to an image-capable model with a notice", () => {
+		const r = resolveSubagentModel({
+			configuredDefault: setting("openai/gpt-5-flash-text", "openai"),
+			sessionModel: session,
+			available,
+			requireImageInput: true,
+		});
+		expect(r.source).not.toBe("default");
+		expect(r.model && supportsImageInput(r.model)).toBe(true);
+		expect(r.notices).toContain(notice({ kind: "textOnly", model: "openai/gpt-5-flash-text", source: "default" }));
+	});
+
+	it("resolves an alias to an image-capable model, skipping the cheaper text-only one", () => {
+		// Ungated, "haiku" (cheap tier) would land on the cheapest cheap model (text-only).
+		expect(resolveSubagentModel({ requested: "haiku", sessionModel: session, available }).model?.id).toBe("gpt-5-flash-text");
+		// Gated, it is auto-upgraded to the image-capable cheap model.
+		expect(resolveSubagentModel({ requested: "haiku", sessionModel: session, available, requireImageInput: true }).model?.id).toBe("gpt-5-flash-vision");
+	});
+});
+
+describe("refusedModelNote", () => {
+	it("hands the profile the refused model and the default it leaves", () => {
+		expect(refusedModelNote("openai/gpt-5-chat-latest", model("openai", "gpt-5.2", 1.75))).toBe(
+			words().refused({ model: "openai/gpt-5-chat-latest", newDefault: "openai/gpt-5.2" }),
+		);
+		expect(refusedModelNote("openai/gpt-5-chat-latest", undefined)).toBe(words().refused({ model: "openai/gpt-5-chat-latest" }));
+	});
+});

@@ -1,0 +1,1196 @@
+/**
+ * tools/background/index.ts wiring (T15d): the monitor tool's event batching (a real
+ * child process, no fake timers needed — a monitor whose command finishes
+ * flushes its pending batch synchronously, so the cap/overflow reporting is
+ * observable without waiting out MONITOR_BATCH_IDLE_MS), task_stop/task_output
+ * around a still-running task, and the /loop, schedule_wakeup and cron
+ * timers (fake timers, no external process).
+ */
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Cron job ids feed Claude Code's jitter (cron.ts JITTER); ids whose first 8 hex
+// digits are ~0 keep these fire times exact. The jitter itself is cron.test.ts's.
+vi.mock("node:crypto", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:crypto")>();
+	let n = 0;
+	return { ...actual, randomUUID: () => `${(++n).toString(16).padStart(8, "0")}-0000-4000-8000-000000000000` };
+});
+// A monitor spool whose write stream fails: the open targets a directory that does not exist.
+const spool = vi.hoisted(() => ({ fail: false }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	const { dirname, join } = await import("node:path");
+	return {
+		...actual,
+		createWriteStream: ((path: string, options?: unknown) =>
+			actual.createWriteStream(spool.fail ? join(dirname(path), "missing", "output.log") : path, options as never)) as typeof actual.createWriteStream,
+	};
+});
+// The pi a test models, whatever pi is installed: before 1.2.0 (false) a
+// notification before the first prompt goes out as a user message; from 1.2.0
+// (true) it is a custom message. Unset, the installed pi decides.
+const piModel = vi.hoisted(() => ({ customRunsFireBeforeAgentStart: undefined as boolean | undefined }));
+vi.mock("../../extensions/lib/app/pi-version.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../extensions/lib/app/pi-version.ts")>();
+	return { ...actual, piFiresBeforeAgentStartForCustomRuns: (version: string | undefined) => piModel.customRunsFireBeforeAgentStart ?? actual.piFiresBeforeAgentStartForCustomRuns(version) };
+});
+import backgroundExtension from "../../extensions/tools/background/index.ts";
+import { withoutJobReport } from "../../extensions/tools/background/monitor-batch.ts";
+import { RECURRING_MAX_AGE_DAYS } from "../../extensions/lib/agents/cron.ts";
+import { STORED_OUTPUT_CAP } from "../../extensions/lib/shell-run/bash-background.ts";
+import { MONITOR_BATCH_MAX_LINES } from "../../extensions/tools/background/monitor-batch.ts";
+import { TASK_REGISTER_CHANNEL } from "../../extensions/lib/agents/task-registry.ts";
+import { DEFAULT_COALESCE_MS, escapeTaskText, monitorEndedSummary, monitorEventSummary, NOTIFICATION_ID_KEY, oneShotNote } from "../../extensions/lib/notify/notifications.ts";
+import { requireText } from "../../extensions/lib/profile/profile.ts";
+import { SESSION_WORK_CHANNEL, type SessionWorkQuery } from "../../extensions/lib/notify/session-work.ts";
+import { AGENT_CRON_CHANNEL, AGENT_CRON_FIRE_CHANNEL, type AgentCronFire, type AgentCronRequest, agentOwnsCronJobs } from "../../extensions/lib/agents/agent-cron.ts";
+import { SKILL_BODY_CHANNEL, type SkillBodyQuery, SLASH_EXPAND_CHANNEL, type SlashExpandQuery } from "../../extensions/lib/plugins/skill-body.ts";
+import { BUNDLED_SKILLS_DIR } from "../../extensions/lib/plugins/skill-scan.ts";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WORKTREE_CHANNEL } from "../../extensions/lib/agents/worktree-channel.ts";
+import { createFakeCtx, createFakePi, type FakePi, flushNotices } from "./helpers/fake-pi.ts";
+import { resetProcessStateForTest } from "../../extensions/lib/profile/process-state.ts";
+import { toolResultsText } from "../../extensions/lib/request/tool-results-text.ts";
+import { backgroundWords } from "../../extensions/tools/background/text.ts";
+
+// The profile's words: each test checks that the base hands them the right
+// facts and places what they return (One Code's wording is
+// profile/test/background-wiring-wording.test.ts).
+const words = backgroundWords(requireText("background"));
+const toolResultWords = toolResultsText;
+const maxAgeDays = RECURRING_MAX_AGE_DAYS;
+/** A `<summary>` line of a task notification, as the base frames the profile's summary. */
+const summaryTag = (summary: string) => `<summary>${escapeTaskText(summary)}</summary>`;
+/** The first fire of an autonomous /loop (the instructions, then the tick), and every later one. */
+const fullLoopFire = () => words.loop.withPreamble({ persistent: false, tick: words.loop.tick("autonomous") });
+const shortLoopFire = () => words.loop.tick("autonomous");
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
+function mount(): FakePi {
+	const fake = createFakePi();
+	backgroundExtension(fake.pi as never);
+	// An established session: a prompt() has run, so notifications take the
+	// custom-message path (before the first prompt they go out as a user message
+	// — createTaskNotifier, STEERING-REVIEW-2026-09-05 H1).
+	void fake.fire("before_agent_start", {}, createFakeCtx({}));
+	return fake;
+}
+
+/**
+ * A ctx for a session that outlives the turn (the TUI): the monitor detaches
+ * there. The fake's default mode is "print", a one-shot, where the monitor now
+ * runs to its end inside the tool call (LIFECYCLE-REVIEW-2026-09-06 M3).
+ */
+const liveSessionCtx = (overrides: Record<string, unknown> = {}) => createFakeCtx({ hasUI: true, mode: "tui", ...overrides });
+
+describe("background wiring: monitor batching", () => {
+	it("flushes a batch (capped, with overflow count) as soon as the command exits", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const monitor = fake.tools.get("monitor")!;
+		const lineCount = MONITOR_BATCH_MAX_LINES + 10;
+		const start = (await monitor.execute(
+			"c1",
+			{ command: `for i in $(seq 1 ${lineCount}); do echo line$i; done`, description: "many lines" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		const taskId = start.details.taskId;
+
+		// Wait for the notifier to deliver (real timers): the batch and the
+		// completion arrive together, so they merge into one message after the
+		// coalescing window. (Not task_output: reading a finished task's output
+		// withdraws its pending notification — see the next test.)
+		for (let waited = 0; fake.sentMessages.length === 0 && waited < 5000; waited += 50) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		await new Promise((resolve) => setTimeout(resolve, DEFAULT_COALESCE_MS + 50));
+
+		// CC's mid-run monitor batch: the event summary, with the lines in <event>.
+		const eventSummary = summaryTag(monitorEventSummary("many lines"));
+		const batchMessage = fake.sentMessages.find((m) => {
+			const text = (m.message.content as Array<{ text?: string }>)[0]?.text ?? "";
+			return text.includes(eventSummary);
+		});
+		expect(batchMessage).toBeDefined();
+		const batchText = (batchMessage!.message.content as Array<{ text: string }>)[0].text;
+		expect(batchText).toContain(escapeTaskText(words.monitor.moreLines({ hidden: 10, taskId })));
+		expect(batchText).toContain(`<task-id>${taskId}</task-id>\n${eventSummary}`); // no <status> on a batch
+
+		// CC's monitor end: status + the ended summary, the recent tail in <event>.
+		const completion = fake.sentMessages.find((m) => {
+			const text = (m.message.content as Array<{ text?: string }>)[0]?.text ?? "";
+			return text.includes("<status>completed</status>") && text.includes(summaryTag(monitorEndedSummary("many lines", "completed", true)));
+		});
+		expect(completion).toBeDefined();
+		// Coalesced (STEERING-REVIEW-2026-09-05 M1): one custom message carries both.
+		expect(completion).toBe(batchMessage);
+		expect(fake.sentMessages).toHaveLength(1);
+		// Delivery policy: steered mid-turn, and able to start a turn on its own.
+		expect(batchMessage!.options).toMatchObject({ deliverAs: "steer", triggerTurn: true });
+	});
+
+	it("a monitor's end is withheld when task_output already returned its finished output", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const monitor = fake.tools.get("monitor")!;
+		const start = (await monitor.execute("c1", { command: "echo one; echo two", description: "short" }, undefined, undefined, ctx)) as {
+			details: { taskId: string };
+		};
+		const taskOutput = fake.tools.get("task_output")!;
+		const result = (await taskOutput.execute("c2", { task_id: start.details.taskId, block: true, timeout: 5000 }, undefined, undefined, ctx)) as {
+			content: Array<{ text: string }>;
+		};
+		expect(result.content[0].text).toContain("two");
+		await new Promise((resolve) => setTimeout(resolve, DEFAULT_COALESCE_MS + 50));
+		expect(fake.sentMessages.filter((m) => m.message.customType === "task-notification")).toHaveLength(0);
+	});
+
+	it("task_stop ends a still-running monitor; task_output then reports it stopped", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const monitor = fake.tools.get("monitor")!;
+		const start = (await monitor.execute(
+			"c1",
+			{ command: "sleep 30", description: "long runner" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		const taskId = start.details.taskId;
+
+		const taskStop = fake.tools.get("task_stop")!;
+		const stopResult = (await taskStop.execute("c2", { task_id: taskId }, undefined, undefined, ctx)) as {
+			content: Array<{ text: string }>;
+		};
+		expect(stopResult.content[0].text).toBe(words.tasks.stopRequested({ id: taskId, description: "long runner" }));
+
+		const taskOutput = fake.tools.get("task_output")!;
+		const outputResult = (await taskOutput.execute("c3", { task_id: taskId, block: true, timeout: 5000 }, undefined, undefined, ctx)) as {
+			details: { status: string };
+		};
+		expect(outputResult.details.status).toBe("stopped");
+	});
+
+	it("task_output/task_stop report a clear error for an unknown task id", async () => {
+		const fake = mount();
+		const ctx = createFakeCtx({ hasUI: true });
+		const result = (await fake.tools.get("task_output")!.execute("c1", { task_id: "nope" }, undefined, undefined, ctx)) as {
+			isError: boolean;
+			content: Array<{ text: string }>;
+		};
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toBe(words.tasks.unknownTask({ id: "nope", known: [] }));
+	});
+});
+
+describe("background wiring: schedule_wakeup (Claude Code's dynamic loop)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const wake = (fake: FakePi, params: Record<string, unknown>, ctx: unknown) =>
+		fake.tools.get("schedule_wakeup")!.execute("c", params, undefined, undefined, ctx) as Promise<{ content: Array<{ text: string }>; isError?: boolean; details: Record<string, unknown> }>;
+	const wakeups = (fake: FakePi) => fake.sentMessages.filter((m) => m.message.customType === "wakeup");
+
+	it("fires the prompt verbatim after the clamped delay, lists as a one-shot job, and says when it was clamped", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const scheduled = await wake(fake, { delaySeconds: 5, prompt: "check the build", reason: "quick poll", noop: false }, ctx);
+		expect(scheduled.content[0].text).toBe(words.wakeup.scheduled({ clock: "12:01:00", inSeconds: 60, clampedTo: 60 }));
+		const list = vi.spyOn(words.cron, "list");
+		const listed = await fake.tools.get("cron_list")!.execute("c", {}, undefined, undefined, ctx) as { content: Array<{ text: string }> };
+		expect(list.mock.calls).toEqual([[{ jobs: [{ id: expect.stringMatching(/^[0-9a-f]{8}$/), cadence: "Every day at 12:01 PM", recurring: false, prompt: "check the build" }] }]]);
+		expect(listed.content[0].text).toBe(list.mock.results[0].value);
+
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		expect(wakeups(fake)).toHaveLength(1);
+		expect((wakeups(fake)[0].message.content as Array<{ text: string }>)[0].text).toBe("check the build");
+	});
+
+	it("rejects a call missing a field with Claude Code's errors, and keeps a pending wakeup", async () => {
+		vi.useFakeTimers();
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		await wake(fake, { delaySeconds: 120, prompt: "task", reason: "r", noop: true }, ctx);
+		const noReason = await wake(fake, { delaySeconds: 60, prompt: "p", noop: true }, ctx);
+		expect(noReason).toMatchObject({ isError: true, content: [{ text: words.wakeup.missing("delayAndReason") }] });
+		const noPrompt = await wake(fake, { delaySeconds: 60, reason: "r", noop: true }, ctx);
+		expect(noPrompt.content[0].text).toBe(words.wakeup.missing("prompt"));
+		const noNoop = await wake(fake, { delaySeconds: 60, reason: "r", prompt: "p" }, ctx);
+		expect(noNoop.content[0].text).toBe(words.wakeup.missing("noop"));
+		await vi.advanceTimersByTimeAsync(120_000 + DEFAULT_COALESCE_MS);
+		expect(wakeups(fake)).toHaveLength(1);
+	});
+
+	it("keeps one wakeup pending (a new one supersedes it) and stop cancels it, saying how many it cancelled", async () => {
+		vi.useFakeTimers();
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		await wake(fake, { delaySeconds: 60, prompt: "first", reason: "r", noop: false }, ctx);
+		await wake(fake, { delaySeconds: 120, prompt: "second", reason: "r", noop: false }, ctx);
+		const stopped = await wake(fake, { stop: true }, ctx);
+		expect(stopped.content[0].text).toBe(words.wakeup.stopped({ cancelled: 1 }));
+		const again = await wake(fake, { stop: true }, ctx);
+		expect(again.content[0].text).toBe(words.wakeup.stopped({ cancelled: 0 }));
+		await vi.advanceTimersByTimeAsync(300_000);
+		expect(wakeups(fake)).toHaveLength(0);
+	});
+
+	it("folds a no-op tick into the next wakeup: the streak rides the message, the context drops the tick", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const firstFire = Date.UTC(2026, 8, 25, 6, 29, 0);
+		const branch = [
+			{ type: "custom_message", customType: "wakeup", timestamp: new Date(firstFire).toISOString(), details: {} },
+			{ type: "message", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "c1", name: "schedule_wakeup", arguments: { noop: true } }] } },
+			{ type: "message", message: { role: "toolResult", toolCallId: "c1", content: [] } },
+		];
+		const ctx = liveSessionCtx({ sessionManager: { getBranch: () => branch } });
+		await wake(fake, { delaySeconds: 60, prompt: "/loop poll", reason: "r", noop: true }, ctx);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		const fired = wakeups(fake)[0];
+		expect(fired.message.details).toMatchObject({ noOpStreak: 1, streakStartedAt: firstFire });
+
+		const context = [
+			{ role: "user", content: "start", timestamp: 1 },
+			{ role: "custom", customType: "wakeup", content: "/loop poll", details: {}, timestamp: 2 },
+			{ role: "assistant", content: [], timestamp: 3 },
+			{ role: "custom", customType: "wakeup", content: "/loop poll", details: { noOpStreak: 1 }, timestamp: 4 },
+		];
+		const [answer] = await fake.fire<{ messages: Array<{ role: string; content: unknown }> }>("context", { messages: context });
+		expect(answer.messages.map((m) => m.role)).toEqual(["user", "user", "custom"]);
+		expect(answer.messages[1].content).toEqual([{ type: "text", text: words.loop.foldNote({ streak: 1 }) }]);
+	});
+
+	it("keepalive: a wakeup's turn that schedules nothing gets one 1200 s fallback; a second miss ends the loop", async () => {
+		vi.useFakeTimers();
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const confirmPending = confirmer(fake);
+		await wake(fake, { delaySeconds: 60, prompt: "/loop check the deploy", reason: "r", noop: false }, ctx);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		await confirmPending();
+		expect(wakeups(fake)).toHaveLength(1);
+
+		// The fired turn runs and ends without calling schedule_wakeup.
+		await fake.fireOne("agent_start", {});
+		await fake.fireOne("agent_settled", {});
+		await vi.advanceTimersByTimeAsync(1_199_000);
+		expect(wakeups(fake)).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1_000 + DEFAULT_COALESCE_MS);
+		await confirmPending();
+		expect(wakeups(fake)).toHaveLength(2);
+
+		// It misses again: the budget is spent, nothing is re-armed.
+		await fake.fireOne("agent_start", {});
+		await fake.fireOne("agent_settled", {});
+		await vi.advanceTimersByTimeAsync(3_600_000);
+		expect(wakeups(fake)).toHaveLength(2);
+	});
+});
+
+/** Confirm each notification as it lands, as pi's delivery loop does, so agent_settled tests the scheduler and not a resend. */
+function confirmer(fake: FakePi) {
+	let confirmed = 0;
+	return async () => {
+		for (; confirmed < fake.sentMessages.length; confirmed++) {
+			const details = fake.sentMessages[confirmed].message.details as Record<string, unknown> | undefined;
+			if (details?.[NOTIFICATION_ID_KEY]) await fake.fireOne("message_end", { message: { role: "custom", details } });
+		}
+	};
+}
+
+type ToolResult = { content: Array<{ text: string }>; details: Record<string, unknown>; isError?: boolean };
+
+describe("background wiring: cron tools", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const cronCall = (fake: FakePi, name: string, params: Record<string, unknown>, ctx: unknown) =>
+		fake.tools.get(name)!.execute("c", params, undefined, undefined, ctx) as Promise<ToolResult>;
+	const cronFires = (fake: FakePi) => fake.sentMessages.filter((m) => m.message.customType === "cron");
+
+	it("a one-shot fires its prompt verbatim at the match while idle, then is gone", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 14, 28, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const created = await cronCall(fake, "cron_create", { cron: "30 14 25 9 *", prompt: "check the deploy", recurring: false }, ctx);
+		expect(created.details.jobId).toMatch(/^[0-9a-f]{8}$/);
+		expect(created.content[0].text).toBe(
+			words.cron.created({ job: { id: created.details.jobId as string, cadence: "30 14 25 9 *", recurring: false, prompt: "check the deploy" }, maxAgeDays }),
+		);
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(cronFires(fake)).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		expect(cronFires(fake)).toHaveLength(1);
+		const fire = cronFires(fake)[0];
+		expect((fire.message.content as Array<{ text: string }>)[0].text).toBe("check the deploy");
+		expect(fire.message.details).toMatchObject({ jobId: created.details.jobId, final: true, source: "model" });
+
+		expect((await cronCall(fake, "cron_list", {}, ctx)).content[0].text).toBe(words.cron.list({ jobs: [] }));
+	});
+
+	it("a recurring job due during a turn fires once at settle, and re-arms for its next match", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const confirmPending = confirmer(fake);
+		const created = await cronCall(fake, "cron_create", { cron: "*/10 * * * *", prompt: "poll ci" }, ctx);
+		expect(created.content[0].text).toBe(
+			words.cron.created({ job: { id: created.details.jobId as string, cadence: "Every 10 minutes", recurring: true, prompt: "poll ci" }, maxAgeDays }),
+		);
+
+		await fake.fireOne("agent_start", {});
+		await vi.advanceTimersByTimeAsync(16 * 60_000);
+		expect(cronFires(fake)).toHaveLength(0);
+		await fake.fireOne("agent_settled", {});
+		await vi.advanceTimersByTimeAsync(DEFAULT_COALESCE_MS);
+		await confirmPending();
+		expect(cronFires(fake)).toHaveLength(1);
+
+		// Next match is 12:20; nothing fires before it.
+		await vi.advanceTimersByTimeAsync(3 * 60_000);
+		expect(cronFires(fake)).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		expect(cronFires(fake)).toHaveLength(2);
+	});
+
+	it("a recurring job keeps firing, each fire opening its turn, after a tick settles on a provider error or an Esc (A3-H1)", async () => {
+		for (const stopReason of ["error", "aborted"]) {
+			vi.useFakeTimers();
+			vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+			const fake = mount();
+			const ctx = liveSessionCtx();
+			await cronCall(fake, "cron_create", { cron: "*/5 * * * *", prompt: "check CI" }, ctx);
+			await fake.fire("agent_start", {});
+			await fake.fire("agent_end", { messages: [{ role: "assistant", stopReason }] });
+			await fake.fire("agent_settled", {});
+			await vi.advanceTimersByTimeAsync(3 * 60 * 60_000);
+			const fires = cronFires(fake);
+			expect(fires.length).toBeGreaterThanOrEqual(35);
+			expect(fires.every((m) => m.options?.triggerTurn === true && m.options?.deliverAs === "steer")).toBe(true);
+			vi.useRealTimers();
+		}
+	});
+
+	it("errors fail loud: a bad expression, an unknown id", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const bad = await cronCall(fake, "cron_create", { cron: "every 5 minutes", prompt: "x" }, ctx);
+		expect(bad.isError).toBe(true);
+		expect(bad.content[0].text).toBe(words.cron.createFailed({ kind: "invalid", cron: "every 5 minutes" }));
+		const unknown = await cronCall(fake, "cron_delete", { id: "deadbeef" }, ctx);
+		expect(unknown.isError).toBe(true);
+		expect(unknown.content[0].text).toBe(words.cron.unknownJob({ id: "deadbeef" }));
+	});
+
+	it("in a one-shot mode the job is created but the result says it can never fire", async () => {
+		const fake = mount();
+		const created = await cronCall(fake, "cron_create", { cron: "*/5 * * * *", prompt: "x" }, createFakeCtx({ mode: "print" }));
+		expect(created.isError).toBeFalsy();
+		const job = { id: created.details.jobId as string, cadence: "Every 5 minutes", recurring: true, prompt: "x" };
+		expect(created.content[0].text).toBe(`${words.cron.created({ job, maxAgeDays })} ${words.cron.neverFires}`);
+	});
+
+	it("accepts `durable` and ignores it, as Claude Code does with its durable mode off", async () => {
+		const fake = mount();
+		const schema = fake.tools.get("cron_create")!.parameters as { properties: Record<string, { description?: string }> };
+		expect(schema.properties.durable.description).toBe(words.cron.createParams({ maxAgeDays }).durable);
+		const created = await cronCall(fake, "cron_create", { cron: "*/10 * * * *", prompt: "x", durable: true }, liveSessionCtx());
+		expect(created.isError).toBeFalsy();
+		expect(created.content[0].text).toBe(
+			words.cron.created({ job: { id: created.details.jobId as string, cadence: "Every 10 minutes", recurring: true, prompt: "x" }, maxAgeDays }),
+		);
+	});
+
+	it("builds /loop's body for the bundled SKILL.md only", () => {
+		const fake = mount();
+		const ours: SkillBodyQuery = { skill: "loop", path: join(BUNDLED_SKILLS_DIR, "loop", "SKILL.md"), args: "5m check CI", cwd: "/nowhere" };
+		fake.events.emit(SKILL_BODY_CHANNEL, ours);
+		expect(ours.body).toBe(words.loop.skillBody({ form: { kind: "prompt", input: "5m check CI" }, loopFile: null, persistent: false, maxAgeDays }));
+		const theirs: SkillBodyQuery = { skill: "loop", path: "/project/.claude/skills/loop/SKILL.md", args: "x", cwd: "/nowhere" };
+		fake.events.emit(SKILL_BODY_CHANNEL, theirs);
+		expect(theirs.body).toBeUndefined();
+	});
+
+	it("runs a fired slash command as the skill it names, and expands a no-prompt sentinel", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		fake.events.on(SLASH_EXPAND_CHANNEL, (data) => {
+			const query = data as SlashExpandQuery;
+			if (query.text === "/babysit-prs") query.expanded = "<skill name=\"babysit-prs\">…</skill>";
+		});
+		const ctx = liveSessionCtx();
+		await cronCall(fake, "cron_create", { cron: "1 12 * * *", prompt: "/babysit-prs", recurring: false }, ctx);
+		await cronCall(fake, "cron_create", { cron: "2 12 * * *", prompt: "<<autonomous-loop>>", recurring: false }, ctx);
+		const confirmPending = confirmer(fake);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		await confirmPending();
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		const texts = cronFires(fake).map((m) => (m.message.content as Array<{ text: string }>)[0].text);
+		expect(texts[0]).toBe('<skill name="babysit-prs">…</skill>');
+		expect(texts[1]).toBe(fullLoopFire());
+	});
+
+	it("keeps a subagent's jobs its own: tagged, listed and deletable only by it, fired to it or dropped", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const ask = (request: AgentCronRequest) => {
+			fake.events.emit(AGENT_CRON_CHANNEL, request);
+			return request.result!;
+		};
+		const created = ask({ op: "create", agentId: "a1", cwd: "/project", cron: "1 12 * * *", prompt: "agent check", recurring: false });
+		const jobId = created.details!.jobId as string;
+		expect(jobId).toMatch(/^[0-9a-f]{8}$/);
+		expect(created.text).toBe(words.cron.created({ job: { id: jobId, cadence: "Every day at 12:01 PM", recurring: false, prompt: "agent check" }, maxAgeDays }));
+		await cronCall(fake, "cron_create", { cron: "*/10 * * * *", prompt: "main job" }, ctx);
+
+		expect(ask({ op: "list", agentId: "a1" }).text).toBe(words.cron.list({ jobs: [{ id: jobId, cadence: "Every day at 12:01 PM", recurring: false, prompt: "agent check" }] }));
+		expect(ask({ op: "list", agentId: "a2" }).text).toBe(words.cron.list({ jobs: [] }));
+		// What keeps the agent resident (subagents' reaper).
+		expect(agentOwnsCronJobs(fake.events, "a1")).toBe(true);
+		expect(agentOwnsCronJobs(fake.events, "a2")).toBe(false);
+		// The main session sees every job.
+		const list = vi.spyOn(words.cron, "list");
+		await cronCall(fake, "cron_list", {}, ctx);
+		expect(list.mock.calls[0][0].jobs.map((job) => job.prompt).sort()).toEqual(["agent check", "main job"]);
+		expect(ask({ op: "delete", agentId: "a2", id: jobId })).toEqual({ text: words.cron.notOwner({ id: jobId }), isError: true });
+
+		const fires: AgentCronFire[] = [];
+		fake.events.on(AGENT_CRON_FIRE_CHANNEL, (data) => fires.push(data as AgentCronFire));
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		expect(fires).toMatchObject([{ agentId: "a1", jobId }]);
+		expect(fires[0].text(undefined)).toBe("agent check");
+		// Nothing reached the main conversation.
+		expect(cronFires(fake)).toHaveLength(0);
+	});
+
+	it("tracks each recipient's /loop delivery apart: a subagent gets the full instructions on its own first fire", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const agentTexts: string[] = [];
+		const childBranch: unknown[] = [];
+		const conversation = {
+			getBranch: () => childBranch,
+			appendEntry: (customType: string, data: unknown) => {
+				childBranch.push({ type: "custom", customType, data });
+			},
+		};
+		fake.events.on(AGENT_CRON_FIRE_CHANNEL, (data) => {
+			const fire = data as AgentCronFire;
+			fire.delivered = true;
+			agentTexts.push(fire.text(conversation));
+		});
+		await cronCall(fake, "cron_create", { cron: "1 12 * * *", prompt: "<<autonomous-loop>>", recurring: false }, ctx);
+		for (const minute of [2, 3]) {
+			fake.events.emit(AGENT_CRON_CHANNEL, { op: "create", agentId: "a1", cwd: "/project", cron: `${minute} 12 * * *`, prompt: "<<autonomous-loop>>", recurring: false } satisfies AgentCronRequest);
+		}
+		const confirmPending = confirmer(fake);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		await confirmPending();
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
+		const mainText = (cronFires(fake)[0].message.content as Array<{ text: string }>)[0].text;
+		expect(mainText).toBe(fullLoopFire());
+		expect(agentTexts).toEqual([fullLoopFire(), shortLoopFire()]);
+	});
+
+	it("resolves a fired prompt in its owner's directory: the agent's, the main worktree, or the session's", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		await fake.fire("session_start", {}, liveSessionCtx({ cwd: "/project" }));
+		const cwds: Record<string, string> = {};
+		fake.events.on(SLASH_EXPAND_CHANNEL, (data) => {
+			const query = data as SlashExpandQuery;
+			cwds[query.text] = query.cwd;
+		});
+		// The subagents extension resolves an agent's fire as it sends it.
+		fake.events.on(AGENT_CRON_FIRE_CHANNEL, (data) => {
+			const fire = data as AgentCronFire;
+			fire.delivered = true;
+			fire.text(undefined);
+		});
+		const ctx = liveSessionCtx({ cwd: "/project" });
+		await cronCall(fake, "cron_create", { cron: "1 12 * * *", prompt: "/main-before", recurring: false }, ctx);
+		fake.events.emit(AGENT_CRON_CHANNEL, { op: "create", agentId: "a1", cwd: "/agent-tree", cron: "1 12 * * *", prompt: "/agent", recurring: false } satisfies AgentCronRequest);
+		await cronCall(fake, "cron_create", { cron: "2 12 * * *", prompt: "/main-in-worktree", recurring: false }, ctx);
+		await cronCall(fake, "cron_create", { cron: "3 12 * * *", prompt: "/main-after", recurring: false }, ctx);
+
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		fake.events.emit(WORKTREE_CHANNEL, { path: "/project-wt", branch: "wt" });
+		await vi.advanceTimersByTimeAsync(60_000);
+		fake.events.emit(WORKTREE_CHANNEL, null);
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(cwds).toEqual({ "/main-before": "/project", "/agent": "/agent-tree", "/main-in-worktree": "/project-wt", "/main-after": "/project" });
+	});
+
+	it("drops a recurring job whose agent has ended", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const request: AgentCronRequest = { op: "create", agentId: "gone", cwd: "/project", cron: "*/10 * * * *", prompt: "tick" };
+		fake.events.emit(AGENT_CRON_CHANNEL, request);
+		await vi.advanceTimersByTimeAsync(10 * 60_000 + DEFAULT_COALESCE_MS);
+		const list: AgentCronRequest = { op: "list", agentId: "gone" };
+		fake.events.emit(AGENT_CRON_CHANNEL, list);
+		expect(list.result!.text).toBe(words.cron.list({ jobs: [] }));
+	});
+
+	it("answers the Stop hook's query with its pending jobs", async () => {
+		const fake = mount();
+		const created = await cronCall(fake, "cron_create", { cron: "*/10 * * * *", prompt: "poll" }, liveSessionCtx());
+		const query: SessionWorkQuery = { crons: [], tasks: [] };
+		fake.events.emit(SESSION_WORK_CHANNEL, query);
+		expect(query.crons).toEqual([{ id: created.details.jobId, schedule: "*/10 * * * *", recurring: true, prompt: "poll" }]);
+		expect(query.tasks).toEqual([]);
+	});
+
+	it("/clear cancels every job and says so in the next session; nothing fires afterwards", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const created = await cronCall(fake, "cron_create", { cron: "*/5 * * * *", prompt: "x" }, ctx);
+		await fake.fire("session_shutdown", { reason: "new" }, ctx);
+		await vi.advanceTimersByTimeAsync(10 * 60_000);
+		expect(cronFires(fake)).toHaveLength(0);
+		const notify = await freshSessionNotify("new");
+		expect(notify.mock.calls[0][0]).toBe(`Cancelled 1 scheduled job with the previous session: ${created.details.jobId} (Every 5 minutes).`);
+	});
+});
+
+/** Mount a fresh instance (the factory re-run after a session swap), start it with a UI, and return its notify mock. */
+async function freshSessionNotify(reason: string) {
+	const next = createFakePi();
+	backgroundExtension(next.pi as never);
+	const notify = vi.fn();
+	await next.fire("session_start", { reason }, createFakeCtx({ hasUI: true, mode: "tui", ui: { notify } }));
+	await flushNotices();
+	return notify;
+}
+
+describe("background wiring: monitor lifecycle (LIFECYCLE-REVIEW-2026-09-06)", () => {
+	it("H1: a monitor whose command ends after session_shutdown repaints nothing, notifies nothing, and never throws", async () => {
+		const fake = mount();
+		const setWidget = vi.fn();
+		const ctx = liveSessionCtx({ ui: { setWidget } });
+		const start = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "sleep 30; echo done", description: "outlives the session" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		expect(setWidget).toHaveBeenCalledTimes(1);
+		fake.sentMessages.length = 0;
+
+		await fake.fire("session_shutdown", { reason: "new" }, ctx);
+		// From here every getter on the old ctx throws, as pi's does after dispose.
+		Object.defineProperty(ctx, "hasUI", {
+			get() {
+				throw new Error("This extension ctx is stale after session replacement");
+			},
+		});
+		// stopAll SIGTERMed the tree; its `close` lands after shutdown. Wait for it
+		// through task_output on a fresh (post-swap) ctx — must not throw either.
+		const out = (await fake.tools.get("task_output")!.execute(
+			"c2",
+			{ task_id: start.details.taskId, block: true, timeout: 5000 },
+			undefined,
+			undefined,
+			createFakeCtx({ mode: "tui" }),
+		)) as { details: { status: string } };
+		expect(out.details.status).toBe("stopped");
+		await new Promise((resolve) => setTimeout(resolve, DEFAULT_COALESCE_MS + 50));
+		expect(setWidget).toHaveBeenCalledTimes(1); // no repaint after shutdown
+		expect(fake.sentMessages).toHaveLength(0); // no completion notification
+	});
+
+	it("A3-H1: after an Esc a monitor keeps one bounded batch while held, and sends it once the next turn starts", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const moreLines = vi.spyOn(words.monitor, "moreLines");
+		await fake.fire("agent_start", {}, ctx);
+		const start = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			// Ten builtin echoes per tick: well past the 50-line batch cap within the
+			// wait even on a slow runner, where each `sleep` fork costs more.
+			{ command: "while true; do for i in 1 2 3 4 5 6 7 8 9 10; do echo tick; done; sleep 0.05; done", description: "ticker" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		await fake.fire("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] }, ctx);
+		await fake.fire("agent_settled", {}, ctx);
+		fake.sentMessages.length = 0;
+		// Several idle flush windows pass while held: nothing is queued, one batch accumulates.
+		await new Promise((resolve) => setTimeout(resolve, 3_500));
+		expect(fake.sentMessages).toHaveLength(0);
+		// The user's next prompt ends the hold; the next flush tick sends the one batch.
+		await fake.fire("before_agent_start", {}, ctx);
+		for (let waited = 0; fake.sentMessages.length === 0 && waited < 3_000; waited += 50) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		await fake.tools.get("task_stop")!.execute("c2", { task_id: start.details.taskId }, undefined, undefined, ctx);
+		const batches = fake.sentMessages.filter((m) => ((m.message.content as Array<{ text: string }>)[0]?.text ?? "").includes(summaryTag(monitorEventSummary("ticker"))));
+		expect(batches).toHaveLength(1);
+		// The one batch is bounded: it names the lines it left out.
+		expect(moreLines).toHaveBeenCalledOnce();
+		expect(moreLines.mock.calls[0][0]).toMatchObject({ hidden: expect.any(Number), taskId: start.details.taskId });
+		expect((batches[0].message.content as Array<{ text: string }>)[0].text).toContain(escapeTaskText(moreLines.mock.results[0].value));
+	}, 10_000);
+
+	it("M2: task_stop ends the monitored command itself (a `cmd; echo` sequence), so the task finishes at once", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const start = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "sleep 30; echo done", description: "sequence" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		await new Promise((resolve) => setTimeout(resolve, 100)); // let the shell fork `sleep`
+		const stopped = Date.now();
+		await fake.tools.get("task_stop")!.execute("c2", { task_id: start.details.taskId }, undefined, undefined, ctx);
+		const out = (await fake.tools.get("task_output")!.execute(
+			"c3",
+			{ task_id: start.details.taskId, block: true, timeout: 5000 },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { status: string } };
+		expect(out.details.status).toBe("stopped");
+		// Killing only the shell left `sleep 30` holding the pipe: close came 30 s later.
+		expect(Date.now() - stopped).toBeLessThan(3000);
+	});
+
+	it("M3: in a one-shot mode the monitor runs to its end and returns the events in the result, registering nothing", async () => {
+		const fake = mount();
+		const ctx = createFakeCtx({ mode: "print" });
+		const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+		const result = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "echo ev1; echo ev2; echo ev3", description: "one-shot" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { content: Array<{ text: string }>; details: Record<string, unknown>; isError?: boolean };
+		expect(ranToEnd).toHaveBeenCalledOnce();
+		expect(ranToEnd.mock.calls[0][0]).toEqual({
+			id: expect.any(String),
+			description: "one-shot",
+			end: { kind: "completed" },
+			events: 3,
+			note: oneShotNote("monitor"),
+			output: "ev1\nev2\nev3",
+		});
+		expect(result.content[0].text).toBe(ranToEnd.mock.results[0].value);
+		expect(result.isError).toBeFalsy();
+		expect(result.details.taskId).toBeUndefined();
+		// Nothing addressable afterwards, and no notification ever queued.
+		const lookup = (await fake.tools.get("task_output")!.execute("c2", { task_id: "anything" }, undefined, undefined, ctx)) as {
+			content: Array<{ text: string }>;
+		};
+		expect(lookup.content[0].text).toBe(words.tasks.unknownTask({ id: "anything", known: [] }));
+		await new Promise((resolve) => setTimeout(resolve, DEFAULT_COALESCE_MS + 50));
+		expect(fake.sentMessages).toHaveLength(0);
+	});
+
+	it("A3-M2: a last line without a newline is an event, one-shot and interactive; a silent monitor says it saw nothing", async () => {
+		const fake = mount();
+		const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+		const oneShot = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "printf 'first\\nREADY'", description: "health" },
+			undefined,
+			undefined,
+			createFakeCtx({ mode: "print" }),
+		)) as { content: Array<{ text: string }> };
+		expect(ranToEnd.mock.calls[0][0]).toMatchObject({ end: { kind: "completed" }, events: 2, output: "first\nREADY" });
+		expect(oneShot.content[0].text).toBe(ranToEnd.mock.results[0].value);
+
+		const ctx = liveSessionCtx();
+		const output = async (command: string) => {
+			const start = (await fake.tools.get("monitor")!.execute("c2", { command, description: "tail" }, undefined, undefined, ctx)) as {
+				details: { taskId: string };
+			};
+			const out = (await fake.tools.get("task_output")!.execute("c3", { task_id: start.details.taskId, block: true, timeout: 5000 }, undefined, undefined, ctx)) as {
+				content: Array<{ text: string }>;
+			};
+			return out.content[0].text;
+		};
+		expect(await output("printf 'READY'")).toContain("READY");
+		const silent = await output("true");
+		expect(silent).toContain(words.monitor.noOutput);
+		expect(silent).not.toContain(words.tasks.noOutputYet);
+	});
+
+	it("A6-L2: a monitor keeps a UTF-8 character split across two reads whole", async () => {
+		const fake = mount();
+		const result = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "printf '\\342\\202'; sleep 0.2; printf '\\254 ok\\n'", description: "utf8" },
+			undefined,
+			undefined,
+			createFakeCtx({ mode: "print" }),
+		)) as { content: Array<{ text: string }> };
+		expect(result.content[0].text).toContain("€ ok");
+		expect(result.content[0].text).not.toContain("\uFFFD");
+	});
+
+	it("A3-L3: task_output clips a long stream behind a header naming the monitor's spool file, which holds it all", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "monitor-spool-"));
+		try {
+			const fake = mount();
+			const ctx = liveSessionCtx({ sessionManager: { getSessionDir: () => dir } });
+			const start = (await fake.tools.get("monitor")!.execute(
+				"c1",
+				{ command: "for i in $(seq 1 4000); do echo line-$i-padding-padding; done", description: "long" },
+				undefined,
+				undefined,
+				ctx,
+			)) as { details: { taskId: string } };
+			const out = (await fake.tools.get("task_output")!.execute("c2", { task_id: start.details.taskId, block: true, timeout: 5000 }, undefined, undefined, ctx)) as {
+				content: Array<{ text: string }>;
+				details: { logPath?: string };
+			};
+			const logPath = join(dir, "monitor", start.details.taskId, "output.log");
+			expect(out.details.logPath).toBe(logPath);
+			const body = out.content[0].text.split("\n\n").slice(1).join("\n\n");
+			expect(body.startsWith(words.tasks.clippedHeader({ path: logPath }))).toBe(true);
+			expect(body.length).toBeLessThanOrEqual(32_000);
+			expect(body).toContain("line-4000-");
+			// Whole the moment the blocking task_output returns: the task finishes after the spool closes.
+			const spooled = readFileSync(logPath, "utf8");
+			expect(spooled.startsWith("line-1-padding-padding\n")).toBe(true);
+			expect(spooled).toContain("line-4000-padding-padding\n");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a monitor whose spool fails names no spool file and persists its output instead", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "monitor-spool-fail-"));
+		spool.fail = true;
+		try {
+			const fake = mount();
+			const ctx = liveSessionCtx({ sessionManager: { getSessionDir: () => dir } });
+			const clippedHeader = vi.spyOn(words.tasks, "clippedHeader");
+			const persisted = vi.spyOn(toolResultWords, "persisted");
+			const start = (await fake.tools.get("monitor")!.execute(
+				"c1",
+				{ command: "for i in $(seq 1 4000); do echo line-$i-padding-padding; done", description: "long" },
+				undefined,
+				undefined,
+				ctx,
+			)) as { details: { taskId: string } };
+			const out = (await fake.tools.get("task_output")!.execute("c2", { task_id: start.details.taskId, block: true, timeout: 5000 }, undefined, undefined, ctx)) as {
+				content: Array<{ text: string }>;
+				details: { logPath?: string };
+			};
+			expect(out.details.logPath).toBeUndefined();
+			const text = out.content[0].text;
+			// No spool file is named; the persisted copy is.
+			expect(clippedHeader).not.toHaveBeenCalled();
+			expect(persisted).toHaveBeenCalledOnce();
+			const { file } = persisted.mock.calls[0][0];
+			expect(text).toContain(persisted.mock.results[0].value);
+			const saved = readFileSync(file, "utf8");
+			expect(saved.startsWith("line-1-padding-padding\n")).toBe(true);
+			expect(saved).toContain("line-4000-padding-padding");
+		} finally {
+			spool.fail = false;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a one-shot monitor past the in-memory cap persists every line from its spool", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "monitor-oneshot-spool-"));
+		try {
+			const fake = mount();
+			const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+			const persisted = vi.spyOn(toolResultWords, "persisted");
+			const result = (await fake.tools.get("monitor")!.execute(
+				"c1",
+				{ command: "for i in $(seq 1 12000); do echo line-$i-padding-padding-padding; done", description: "long" },
+				undefined,
+				undefined,
+				createFakeCtx({ mode: "print", sessionManager: { getSessionDir: () => dir } }),
+			)) as { content: Array<{ text: string }> };
+			expect(ranToEnd.mock.calls[0][0]).toMatchObject({ end: { kind: "completed" }, events: 12000 });
+			expect(result.content[0].text).toBe(ranToEnd.mock.results[0].value);
+			const { output } = ranToEnd.mock.calls[0][0];
+			expect(output).toContain(`${toolResultWords.previewHeading({ kb: 2 })}\nline-1-padding-padding-padding\n`);
+			// The spool itself is named: nothing reads it whole or copies it.
+			expect(persisted).toHaveBeenCalledOnce();
+			const { file } = persisted.mock.calls[0][0];
+			expect(output).toContain(persisted.mock.results[0].value);
+			expect(file.startsWith(join(dir, "monitor"))).toBe(true);
+			expect(file.endsWith("output.log")).toBe(true);
+			expect(existsSync(join(dir, "tool-results"))).toBe(false);
+			const saved = readFileSync(file, "utf8");
+			expect(saved.startsWith("line-1-padding-padding-padding\n")).toBe(true);
+			expect(saved).toContain("line-12000-padding-padding-padding");
+			expect(saved).not.toContain(words.monitor.earlierTruncated);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a session-less one-shot monitor past the in-memory cap still spools every line", async () => {
+		const fake = mount();
+		const persisted = vi.spyOn(toolResultWords, "persisted");
+		await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "for i in $(seq 1 12000); do echo line-$i-padding-padding-padding; done", description: "long" },
+			undefined,
+			undefined,
+			createFakeCtx({ mode: "print", sessionManager: { getSessionDir: () => undefined, getSessionId: () => "monitor-sessionless-test" } }),
+		);
+		expect(persisted).toHaveBeenCalledOnce();
+		const file: string | undefined = persisted.mock.calls[0][0].file;
+		expect(file).toBeDefined();
+		try {
+			expect(file!).toContain(join("monitor-sessionless-test", "monitor"));
+			const saved = readFileSync(file!, "utf8");
+			expect(saved.startsWith("line-1-padding-padding-padding\n")).toBe(true);
+			expect(saved).toContain("line-12000-padding-padding-padding");
+		} finally {
+			rmSync(join(file!, "..", "..", ".."), { recursive: true, force: true });
+		}
+	});
+
+	it("a one-shot monitor past the in-memory cap whose spool fails says only the tail was kept", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "monitor-oneshot-spool-fail-"));
+		spool.fail = true;
+		try {
+			const fake = mount();
+			const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+			const persisted = vi.spyOn(toolResultWords, "persisted");
+			await fake.tools.get("monitor")!.execute(
+				"c1",
+				{ command: "for i in $(seq 1 12000); do echo line-$i-padding-padding-padding; done", description: "long" },
+				undefined,
+				undefined,
+				createFakeCtx({ mode: "print", sessionManager: { getSessionDir: () => dir } }),
+			);
+			const { output } = ranToEnd.mock.calls[0][0];
+			expect(output).toContain("<persisted-output>");
+			expect(output).toContain(words.monitor.spoolLost({ keptChars: STORED_OUTPUT_CAP }));
+			const { file } = persisted.mock.calls[0][0];
+			expect(readFileSync(file, "utf8")).toContain("line-12000-padding-padding-padding");
+		} finally {
+			spool.fail = false;
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("A3-L3: a long output with no spool file is persisted whole, never cut", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "task-output-persist-"));
+		try {
+			const fake = mount();
+			const ctx = liveSessionCtx({ sessionManager: { getSessionDir: () => dir } });
+			const report = `${"start of the report\n"}${"x".repeat(60_000)}\nend of the report`;
+			fake.events.emit(TASK_REGISTER_CHANNEL, {
+				id: "bagent01",
+				kind: "agent",
+				description: "explore",
+				status: "completed",
+				startedAt: Date.now(),
+				output: () => report,
+				stop: () => {},
+				finished: Promise.resolve(),
+			});
+			const persisted = vi.spyOn(toolResultWords, "persisted");
+			const out = (await fake.tools.get("task_output")!.execute("c1", { task_id: "bagent01" }, undefined, undefined, ctx)) as { content: Array<{ text: string }> };
+			const text = out.content[0].text;
+			expect(text).toContain("<persisted-output>");
+			expect(persisted).toHaveBeenCalledOnce();
+			expect(text).toContain(persisted.mock.results[0].value);
+			expect(readFileSync(persisted.mock.calls[0][0].file, "utf8")).toBe(report);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("M3: a one-shot monitor stops when the tool call is aborted and says so", async () => {
+		const fake = mount();
+		const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(), 150);
+		const result = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "sleep 30; echo done", description: "aborted" },
+			controller.signal,
+			undefined,
+			createFakeCtx({ mode: "json" }),
+		)) as { content: Array<{ text: string }> };
+		expect(ranToEnd.mock.calls[0][0]).toMatchObject({ end: { kind: "aborted" }, events: 0, output: words.monitor.noEvents });
+		expect(result.content[0].text).toBe(ranToEnd.mock.results[0].value);
+	});
+
+	it("M3: drops bash's report of the job a stop killed, and keeps the command's own stderr", async () => {
+		const fake = mount();
+		const ranToEnd = vi.spyOn(words.monitor, "ranToEnd");
+		const controller = new AbortController();
+		// Abort only once the trap is set and the early stderr is written.
+		const dir = mkdtempSync(join(tmpdir(), "monitor-report-"));
+		const ready = join(dir, "ready");
+		const poll = setInterval(() => {
+			if (existsSync(ready)) {
+				clearInterval(poll);
+				controller.abort();
+			}
+		}, 10);
+		// The trap stands in for bash's report, which comes only when the group
+		// signal reaches the command first.
+		const report = "/bin/bash: line 1: 4242 Terminated: 15          sleep 30";
+		try {
+			await fake.tools.get("monitor")!.execute(
+				"c1",
+				{ command: `trap 'echo "${report}" >&2; echo torn down >&2; exit 0' TERM; echo failed early >&2; touch '${ready}'; sleep 30 & wait`, description: "aborted" },
+				controller.signal,
+				undefined,
+				createFakeCtx({ mode: "json" }),
+			);
+		} finally {
+			clearInterval(poll);
+			rmSync(dir, { recursive: true, force: true });
+		}
+		// Windows ends the process tree without a signal, so the trap never runs there.
+		const output = process.platform === "win32" ? "failed early" : "failed early\ntorn down";
+		expect(ranToEnd.mock.calls[0][0]).toMatchObject({ end: { kind: "aborted" }, events: 0, output });
+	});
+
+	it("withoutJobReport removes only bash's job report lines", () => {
+		expect(withoutJobReport("a\n/bin/bash: line 1: 41676 Terminated: 15          sleep 30\nb\n")).toBe("a\nb\n");
+		expect(withoutJobReport("bash: line 3:  12 Killed: 9  yes\n")).toBe("");
+		expect(withoutJobReport("Terminated by the user\n")).toBe("Terminated by the user\n");
+	});
+
+	it("L3: /clear reports the tasks it stopped in the NEXT session, not the one being torn down", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const start = (await fake.tools.get("monitor")!.execute(
+			"c1",
+			{ command: "sleep 30", description: "dev server" },
+			undefined,
+			undefined,
+			ctx,
+		)) as { details: { taskId: string } };
+		await fake.fire("session_shutdown", { reason: "new" }, ctx);
+
+		// The replacement instance (factories re-run on /clear, findings §8).
+		const notify = await freshSessionNotify("new");
+		expect(notify).toHaveBeenCalledTimes(1);
+		expect(notify.mock.calls[0][0]).toContain(`Stopped 1 background task with the previous session: ${start.details.taskId} (dev server).`);
+
+		// Consumed: a further session start says nothing.
+		expect(await freshSessionNotify("new")).not.toHaveBeenCalled();
+	});
+
+	it("L3: a quit leaves no notice behind", async () => {
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		await fake.tools.get("monitor")!.execute("c1", { command: "sleep 30", description: "x" }, undefined, undefined, ctx);
+		await fake.fire("session_shutdown", { reason: "quit" }, ctx);
+		expect(await freshSessionNotify("startup")).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Lifecycle grid round 3 (R3-M17, R3-L12, R3-L13): what a /reload, a /tree, a
+ * compaction and pi's re-evaluation of the module leave behind.
+ */
+describe("background wiring: state across /reload, /tree and compaction", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	const cronCall = (fake: FakePi, name: string, params: Record<string, unknown>, ctx: unknown) =>
+		fake.tools.get(name)!.execute("c", params, undefined, undefined, ctx) as Promise<ToolResult>;
+	const firedTexts = (fake: FakePi) =>
+		fake.sentMessages.filter((m) => m.message.customType === "cron").map((m) => (m.message.content as Array<{ text: string }>)[0].text);
+	/** One sentinel fire one minute from now, on the session whose branch `ctx` reads. */
+	const fireSentinel = async (fake: FakePi, ctx: unknown) => {
+		const at = new Date(Date.now() + 60_000);
+		await cronCall(fake, "cron_create", { cron: `${at.getMinutes()} ${at.getHours()} * * *`, prompt: "<<autonomous-loop>>", recurring: false }, ctx);
+		await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+		// pi delivers the fire's message (its customType and details as sent).
+		const sent = fake.sentMessages.at(-1)?.message;
+		await fake.fireOne("message_end", { message: { role: "custom", customType: sent?.customType, details: sent?.details } });
+		return firedTexts(fake).at(-1)!;
+	};
+	const isFull = (text: string) => text === fullLoopFire();
+	const isShort = (text: string) => text === shortLoopFire();
+
+	it("R3-M17: after /reload a re-armed wakeup goes out as a wakeup message carrying its fold, not as a user message", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const now = Date.now();
+		// A pi of 1.2.0 or later, whatever pi is installed.
+		piModel.customRunsFireBeforeAgentStart = true;
+		try {
+			// The factory re-run of a /reload: no prompt() has run in this instance.
+			const fake = createFakePi();
+			backgroundExtension(fake.pi as never);
+			const branch = [
+				{ type: "custom_message", customType: "wakeup", timestamp: new Date(now - 60_000).toISOString(), details: {} },
+				{ type: "message", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "w1", name: "schedule_wakeup", arguments: { delaySeconds: 60, prompt: "poll the deploy", reason: "r", noop: true } }] } },
+				{ type: "message", message: { role: "toolResult", toolCallId: "w1", toolName: "schedule_wakeup", content: [], details: { scheduledFor: now + 60_000, jobId: "abc12345", startedAt: now - 60_000 }, timestamp: now } },
+			];
+			await fake.fire("session_start", { reason: "reload" }, liveSessionCtx({ sessionManager: { getBranch: () => branch } }));
+			await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+			expect(fake.sentUserMessages).toEqual([]);
+			const wakeups = fake.sentMessages.filter((m) => m.message.customType === "wakeup");
+			expect(wakeups).toHaveLength(1);
+			expect(wakeups[0].message.details).toMatchObject({ jobId: "abc12345", noOpStreak: 1 });
+		} finally {
+			piModel.customRunsFireBeforeAgentStart = undefined;
+		}
+	});
+
+	it("R3-L12: the main session's /loop delivery follows its branch: kept across /reload, resent after a /tree to a branch without it and after a compaction", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx({ sessionManager: { getBranch: () => fake.branch } });
+		expect(isFull(await fireSentinel(fake, ctx))).toBe(true);
+		expect(isShort(await fireSentinel(fake, ctx))).toBe(true);
+
+		// /reload: a new instance over the same branch.
+		const reloaded = mount();
+		reloaded.branch.push(...fake.branch);
+		const reloadedCtx = liveSessionCtx({ sessionManager: { getBranch: () => reloaded.branch } });
+		await reloaded.fire("session_start", { reason: "reload" }, reloadedCtx);
+		expect(isShort(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+
+		// /tree to a branch that never got the instructions.
+		reloaded.branch.length = 0;
+		await reloaded.fire("session_tree", {}, reloadedCtx);
+		expect(isFull(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+
+		// A compaction summarizes them away: the next fire sends them again.
+		reloaded.branch.push({ type: "compaction", id: "cmp", parentId: reloaded.branch.at(-1)?.id ?? null });
+		expect(isFull(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+		expect(isShort(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+	});
+
+	it("on a pi before 1.2.0 records the /loop delivery of a first fire that went out as a user message", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		piModel.customRunsFireBeforeAgentStart = false;
+		try {
+			// No prompt has run: the session's first input was the /loop itself.
+			const fake = createFakePi();
+			backgroundExtension(fake.pi as never);
+			const ctx = liveSessionCtx({ sessionManager: { getBranch: () => fake.branch } });
+			await fake.fire("session_start", { reason: "startup" }, ctx);
+			const at = new Date(Date.now() + 60_000);
+			await cronCall(fake, "cron_create", { cron: `${at.getMinutes()} ${at.getHours()} * * *`, prompt: "<<autonomous-loop>>", recurring: false }, ctx);
+			await vi.advanceTimersByTimeAsync(60_000 + DEFAULT_COALESCE_MS);
+			expect(fake.sentUserMessages).toHaveLength(1);
+			expect(isFull(fake.sentUserMessages[0].content as string)).toBe(true);
+			// pi runs that message as a prompt: the next fire goes the custom-message way.
+			await fake.fire("before_agent_start", {}, ctx);
+			await fake.fire("agent_start", {}, ctx);
+			await fake.fire("agent_settled", {}, ctx);
+			expect(isShort(await fireSentinel(fake, ctx))).toBe(true);
+		} finally {
+			piModel.customRunsFireBeforeAgentStart = undefined;
+		}
+	});
+
+	it("records the /loop delivery only once the fire's message is delivered: a /reload that drops a held fire resends the instructions", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		const ctx = liveSessionCtx({ sessionManager: { getBranch: () => fake.branch } });
+		await fake.fire("session_start", { reason: "startup" }, ctx);
+		// The fire is built, but the notifier still holds it (the coalescing window) when /reload shuts the session down.
+		const at = new Date(Date.now() + 60_000);
+		await cronCall(fake, "cron_create", { cron: `${at.getMinutes()} ${at.getHours()} * * *`, prompt: "<<autonomous-loop>>", recurring: false }, ctx);
+		await vi.advanceTimersByTimeAsync(60_000);
+		await fake.fire("session_shutdown", { reason: "reload" }, ctx);
+		await vi.advanceTimersByTimeAsync(DEFAULT_COALESCE_MS);
+		expect(firedTexts(fake)).toEqual([]);
+
+		// The next fire after the reload: the model never had the instructions, so they go out in full.
+		const reloaded = mount();
+		reloaded.branch.push(...fake.branch);
+		const reloadedCtx = liveSessionCtx({ sessionManager: { getBranch: () => reloaded.branch } });
+		await reloaded.fire("session_start", { reason: "reload" }, reloadedCtx);
+		expect(isFull(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+		// That one was delivered: the next fire is the short tick.
+		expect(isShort(await fireSentinel(reloaded, reloadedCtx))).toBe(true);
+	});
+
+	it("R3-L12: a subagent's /loop delivery follows its own conversation, so its own compaction resets it", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 25, 12, 0, 0));
+		const fake = mount();
+		// The agent's session, as the subagents extension hands it to the fire.
+		const childBranch: Array<Record<string, unknown>> = [];
+		const conversation = {
+			getBranch: () => childBranch,
+			appendEntry: (customType: string, data: unknown) => {
+				childBranch.push({ type: "custom", customType, data });
+			},
+		};
+		const agentTexts: string[] = [];
+		fake.events.on(AGENT_CRON_FIRE_CHANNEL, (data) => {
+			const fire = data as AgentCronFire;
+			fire.delivered = true;
+			agentTexts.push(fire.text(conversation));
+		});
+		for (const minute of [1, 2, 3, 4]) {
+			fake.events.emit(AGENT_CRON_CHANNEL, { op: "create", agentId: "a1", cwd: "/project", cron: `${minute} 12 * * *`, prompt: "<<autonomous-loop>>", recurring: false } satisfies AgentCronRequest);
+		}
+		await vi.advanceTimersByTimeAsync(2 * 60_000 + 1_000);
+		childBranch.push({ type: "compaction" });
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
+		expect(agentTexts.map((text) => (isFull(text) ? "full" : isShort(text) ? "short" : text))).toEqual(["full", "short", "full", "short"]);
+		// The main session's branch holds none of it.
+		expect(fake.branch).toEqual([]);
+	});
+
+	it("R3-L13: the notice of the tasks a /reload stopped reaches the reloaded instance, whose module pi evaluates again", async () => {
+		resetProcessStateForTest();
+		const fake = mount();
+		const ctx = liveSessionCtx();
+		const start = (await fake.tools.get("monitor")!.execute("c1", { command: "sleep 30", description: "dev server" }, undefined, undefined, ctx)) as {
+			details: { taskId: string };
+		};
+		await fake.fire("session_shutdown", { reason: "reload" }, ctx);
+
+		vi.resetModules();
+		const { default: reloadedExtension } = await import("../../extensions/tools/background/index.ts");
+		const next = createFakePi();
+		reloadedExtension(next.pi as never);
+		const notify = vi.fn();
+		await next.fire("session_start", { reason: "reload" }, createFakeCtx({ hasUI: true, mode: "tui", ui: { notify } }));
+		await flushNotices();
+		expect(notify).toHaveBeenCalledTimes(1);
+		expect(notify.mock.calls[0][0]).toBe(`Stopped 1 background task on reload: ${start.details.taskId} (dev server).`);
+	});
+});

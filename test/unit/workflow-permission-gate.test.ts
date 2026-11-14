@@ -1,0 +1,249 @@
+import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import os from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { useShippedProfileWithAllTools } from "./helpers/profile.ts";
+import { resetAutoMemoryForTest } from "../../extensions/lib/context/auto-memory.ts";
+import { memoryDir } from "../../extensions/lib/context/memory.ts";
+import { localGateMode } from "../../extensions/lib/agents/permission-gate.ts";
+import { powerShellSpawn } from "../../extensions/lib/shell-run/shell-spawn.ts";
+import { sessionResultsDir } from "../../extensions/lib/request/persisted-output.ts";
+import { buildGate as buildGateHarness } from "./helpers/permission-gate-harness.ts";
+import { useRepositorySettings } from "./helpers/settings-files.ts";
+import { persistProjectAllowApproval } from "../../extensions/lib/consent/project-trust.ts";
+import { envName } from "../../extensions/lib/profile/brand.mjs";
+import { stubHome } from "./helpers/home.ts";
+import { POWERSHELL_TEST_TIMEOUT } from "./helpers/powershell-parse.ts";
+import type { PermissionRefusal } from "../../extensions/lib/rules/permission-text.ts";
+import { permissionText } from "../../extensions/lib/rules/permission-text.ts";
+
+// This file covers the base's handling of grep, find and ls, which a profile may turn off.
+useShippedProfileWithAllTools();
+
+/** Why the child gate refused a call, in the profile's words. */
+const refused = (refusal: PermissionRefusal) => permissionText().refused(refusal);
+
+const buildGate = (...args: Parameters<typeof buildGateHarness>) => buildGateHarness(...args).handler;
+
+describe("permissionGateFactory", () => {
+	it("blocks deny-ruled commands", async () => {
+		const handler = buildGate({ permissions: { deny: ["Bash(rm -rf:*)"] } });
+		const result = await handler({ toolName: "bash", input: { command: "rm -rf /tmp/x" } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe(refused({ kind: "childDenied", rule: "Bash(rm -rf:*)" }));
+	});
+
+	it("allows explicitly allowed commands and in-project reads; a read outside the cwd fails closed (2026-09-05 H2)", async () => {
+		const { handler, cwd } = buildGateHarness({ permissions: { allow: ["Bash(npm run test:*)"] } });
+		expect(await handler({ toolName: "bash", input: { command: "npm run test -- --grep x" } })).toBeUndefined();
+		expect(await handler({ toolName: "read", input: { path: join(cwd, "README.md") } })).toBeUndefined();
+		expect(await handler({ toolName: "read", input: { path: "README.md" } })).toBeUndefined();
+		expect(await handler({ toolName: "grep", input: { pattern: "x" } })).toBeUndefined();
+		// A file outside the cwd, and Claude Code's `//absolute` rule covering it —
+		// on Windows in CC's POSIX spelling of the drive path (`//c/Windows/**`).
+		const [outsideFile, outsideRule] =
+			process.platform === "win32" ? ["C:\\Windows\\System32\\drivers\\etc\\hosts", "Read(//c/Windows/**)"] : ["/etc/hosts", "Read(//etc/**)"];
+		const outside = await handler({ toolName: "read", input: { path: outsideFile } });
+		expect(outside?.block).toBe(true);
+		expect(outside?.reason).toBe(refused({ kind: "childNeedsApproval", outsideWorkingDir: true }));
+		// A Read allow rule covering the path still clears it.
+		const allowed = buildGate({ permissions: { allow: [outsideRule] } });
+		expect(await allowed({ toolName: "read", input: { path: outsideFile } })).toBeUndefined();
+	});
+
+	it("grants the memory folder only while auto-memory is on", async () => {
+		try {
+			for (const enabled of [true, false]) {
+				resetAutoMemoryForTest(enabled);
+				// Real paths: the gate compares the resolved subject with the folder.
+				const cwd = realpathSync.native(mkdtempSync(join(os.tmpdir(), "gate-cwd-")));
+				const home = realpathSync.native(mkdtempSync(join(os.tmpdir(), "gate-home-")));
+				stubHome(home);
+				const dir = memoryDir(home, cwd);
+				mkdirSync(dir, { recursive: true });
+				const handler = buildGateHarness.rebuild(cwd, home);
+				const result = await handler({ toolName: "write", input: { path: join(dir, "fact.md"), content: "x" } });
+				expect(result?.block ?? false, result?.reason).toBe(!enabled);
+			}
+		} finally {
+			vi.unstubAllEnvs();
+			resetAutoMemoryForTest();
+		}
+	});
+
+	it("lets the agent read back its own persisted tool output (sessionResultsDir)", async () => {
+		const { handler } = buildGateHarness({ permissions: {} });
+		// No ctx in this harness → the same private per-process fallback lib/request/persisted-output.ts writes to.
+		const persisted = join(sessionResultsDir(undefined), "tool-results", "abc.txt");
+		expect(await handler({ toolName: "read", input: { path: persisted } })).toBeUndefined();
+		// The shared temp folder every session-less run once wrote to is not working space.
+		const shared = await handler({ toolName: "read", input: { path: join(os.tmpdir(), "one-code", "tool-results", "abc.txt") } });
+		expect(shared?.block).toBe(true);
+	});
+
+	it("acceptEdits (the default here) writes inside the cwd only (2026-09-05 H1)", async () => {
+		const { handler, cwd } = buildGateHarness({ permissions: {} });
+		expect(await handler({ toolName: "write", input: { path: join(cwd, "out.txt"), content: "x" } })).toBeUndefined();
+		const outside = await handler({ toolName: "write", input: { path: join(os.tmpdir(), "gate-probe-outside.txt"), content: "x" } });
+		expect(outside?.block).toBe(true);
+		expect(outside?.reason).toBe(refused({ kind: "childNeedsApproval", outsideWorkingDir: true }));
+	});
+
+	it("auto-allows edits (acceptEdits parity) but blocks unmatched bash fail-closed", async () => {
+		const handler = buildGate({ permissions: {} });
+		expect(await handler({ toolName: "edit", input: { path: "src/a.ts" } })).toBeUndefined();
+		const result = await handler({ toolName: "bash", input: { command: "curl https://example.com" } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe(refused({ kind: "childNeedsApproval", outsideWorkingDir: false }));
+	});
+
+	it("never gates the workflow's own structured_output tool", async () => {
+		const handler = buildGate({ permissions: {} });
+		expect(await handler({ toolName: "structured_output", input: { combined: "x" } })).toBeUndefined();
+	});
+
+	it("deny wins even under bypassPermissions defaultMode", async () => {
+		const handler = buildGate({
+			permissions: { deny: ["Bash(git push:*)"], defaultMode: "bypassPermissions" },
+		});
+		expect((await handler({ toolName: "bash", input: { command: "git push origin main" } }))?.block).toBe(true);
+		expect(await handler({ toolName: "bash", input: { command: "curl https://example.com" } })).toBeUndefined();
+	});
+
+	it("delegates to the parent bridge when one is provided (allow + block pass through)", async () => {
+		const calls: Array<{ toolName: string; cwd: string }> = [];
+		const handler = buildGate({ permissions: { deny: ["Bash(rm -rf:*)"] } }, () => async (call) => {
+			calls.push({ toolName: call.toolName, cwd: call.cwd });
+			// The bridge's decision wins over the local rules (which would deny this rm).
+			return call.toolName === "bash" ? { block: true as const, reason: "bridge says no" } : undefined;
+		});
+		expect(await handler({ toolName: "read", input: { path: "/etc/hosts" } })).toBeUndefined();
+		const blocked = await handler({ toolName: "bash", input: { command: "rm -rf /tmp/x" } });
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toBe("bridge says no");
+		expect(calls.map((c) => c.toolName)).toEqual(["read", "bash"]);
+	});
+
+	it("fails closed when the bridge throws", async () => {
+		const handler = buildGate({ permissions: {} }, () => async () => {
+			throw new Error("boom");
+		});
+		const result = await handler({ toolName: "edit", input: { path: "src/a.ts" } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe(refused({ kind: "bridgeFailed", osMessage: "boom" }));
+	});
+
+	it("never routes the runtime's own tools through the bridge", async () => {
+		let bridgeCalls = 0;
+		const handler = buildGate({ permissions: {} }, () => async () => {
+			bridgeCalls++;
+			return { block: true as const, reason: "should not reach" };
+		});
+		expect(await handler({ toolName: "structured_output", input: {} })).toBeUndefined();
+		expect(bridgeCalls).toBe(0);
+	});
+});
+
+describe("permissionGateFactory — mode and ask rules (P8)", () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it("localGateMode: the published live mode wins, then defaultMode, then acceptEdits", () => {
+		expect(localGateMode("plan", "bypassPermissions")).toBe("plan");
+		expect(localGateMode("manual", undefined)).toBe("default");
+		expect(localGateMode("nonsense", "dontAsk")).toBe("dontAsk");
+		expect(localGateMode(undefined, undefined)).toBe("acceptEdits");
+	});
+
+	it("honours the parent's live mode: default mode has no one to ask, so an edit is denied", async () => {
+		vi.stubEnv(envName("PERMISSION_MODE"), "default");
+		const handler = buildGate({ permissions: {} });
+		const result = await handler({ toolName: "edit", input: { path: "src/a.ts" } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe(refused({ kind: "childNeedsApproval", outsideWorkingDir: false }));
+	});
+
+	it("auto mode without a bridge: edits inside the cwd pass, anything else fails closed", async () => {
+		vi.stubEnv(envName("PERMISSION_MODE"), "auto");
+		const { handler, cwd } = buildGateHarness({ permissions: {} });
+		expect(await handler({ toolName: "edit", input: { path: join(cwd, "src", "a.ts") } })).toBeUndefined();
+		const outside = await handler({ toolName: "write", input: { path: join(os.tmpdir(), "elsewhere.txt"), content: "x" } });
+		expect(outside?.block).toBe(true);
+		expect(outside?.reason).toBe(refused({ kind: "childNoClassifier", outsideWorkingDir: true }));
+		const shell = await handler({ toolName: "bash", input: { command: "npm test" } });
+		expect(shell?.block).toBe(true);
+		expect(shell?.reason).toBe(refused({ kind: "childNoClassifier", outsideWorkingDir: false }));
+	});
+
+	it("an ask rule is honoured (denied, since nothing here can ask)", async () => {
+		const handler = buildGate({ permissions: { ask: ["Edit(src/**)"] } });
+		expect((await handler({ toolName: "edit", input: { path: "src/a.ts" } }))?.block).toBe(true);
+		expect(await handler({ toolName: "edit", input: { path: "lib/b.ts" } })).toBeUndefined();
+	});
+});
+
+describe.skipIf(!powerShellSpawn())("permissionGateFactory without a bridge judges PowerShell from its parse (PR-24-POWERSHELL-REVIEW-2026-09-28 M2)", { timeout: POWERSHELL_TEST_TIMEOUT }, () => {
+	afterEach(() => vi.unstubAllEnvs());
+
+	it("allows a read-only line in plan and acceptEdits mode, and still denies what it cannot clear", async () => {
+		for (const mode of ["plan", "acceptEdits"]) {
+			vi.stubEnv(envName("PERMISSION_MODE"), mode);
+			const handler = buildGate({ permissions: {} });
+			expect(await handler({ toolName: "powershell", input: { command: "Get-ChildItem" } }), mode).toBeUndefined();
+			expect((await handler({ toolName: "powershell", input: { command: "Remove-Item -Recurse /" } }))?.block, mode).toBe(true);
+			expect((await handler({ toolName: "powershell", input: { command: "Get-ChildItem {" } }))?.block, mode).toBe(true); // no parse clears nothing
+		}
+	});
+});
+
+describe("permissionGateFactory — what the bridge call carries (SUBAGENT-REVIEW M5)", () => {
+	it("passes the child's session id and turn signal so the parent can name the agent and dismiss its prompt", async () => {
+		const calls: Array<Record<string, unknown>> = [];
+		const handler = buildGate({ permissions: {} }, () => async (call) => {
+			calls.push({ ...call });
+			return undefined;
+		});
+		const controller = new AbortController();
+		const ctx = { cwd: "/tmp/child", signal: controller.signal, sessionManager: { getSessionId: () => "sess-123" } };
+		await (handler as unknown as (e: unknown, c: unknown) => Promise<unknown>)({ toolName: "bash", input: { command: "ls" } }, ctx);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({ toolName: "bash", cwd: "/tmp/child", sessionId: "sess-123" });
+		expect(calls[0].signal).toBe(controller.signal);
+	});
+});
+
+describe("runtime protected dirs (PERMISSIONS-REVIEW-2026-09-05 M7)", () => {
+	afterEach(() => vi.unstubAllEnvs());
+
+	it("blocks a write into pi's agent dir (getAgentDir) even in acceptEdits", async () => {
+		const agentDir = mkdtempSync(join(os.tmpdir(), "gate-agent-dir-"));
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		const { handler } = buildGateHarness({ permissions: {} });
+		const result = await handler({ toolName: "write", input: { path: join(agentDir, "extensions", "evil.ts") } });
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toBe(refused({ kind: "childNeedsApproval", outsideWorkingDir: false }));
+	});
+});
+
+describe("permissionGateFactory — project consent (P10)", () => {
+	// Only a source provider lists a repository settings file; the helper
+	// lists one on any profile.
+	useRepositorySettings();
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	it("a repo's own allow rules count only with the user's stored consent", async () => {
+		vi.stubEnv(envName("STATE_DIR"), mkdtempSync(join(os.tmpdir(), "gate-state-")));
+		const project = { permissions: { allow: ["Bash(curl:*)"] } };
+		const untrusted = buildGateHarness({ permissions: {} }, undefined, project);
+		expect((await untrusted.handler({ toolName: "bash", input: { command: "curl https://example.com" } }))?.block).toBe(true);
+
+		const trusted = buildGateHarness({ permissions: {} }, undefined, project);
+		persistProjectAllowApproval(trusted.cwd, ["Bash(curl:*)"]);
+		// The gate reads consent when it is built, so rebuild it over the same dirs.
+		const handler = buildGateHarness.rebuild(trusted.cwd, trusted.home);
+		expect(await handler({ toolName: "bash", input: { command: "curl https://example.com" } })).toBeUndefined();
+	});
+});

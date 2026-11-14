@@ -1,0 +1,274 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { WORKTREE_CHANNEL, type WorktreeLocation } from "../../extensions/lib/agents/worktree-channel.ts";
+import { resetProcessStateForTest } from "../../extensions/lib/profile/process-state.ts";
+import { projectConfigDir } from "../../extensions/lib/profile/sources.ts";
+import worktreeExtension from "../../extensions/safety/worktree/index.ts";
+import { createFakeCtx, createFakePi, type FakePi } from "./helpers/fake-pi.ts";
+import { worktreeResultText } from "../../extensions/safety/worktree/text.ts";
+
+const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.email=t@t", "-c", "user.name=t", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+type Result = { isError?: boolean; content: { text: string }[]; details: { worktreeState?: unknown } };
+let root: string;
+let repo: string;
+let fake: FakePi;
+let location: WorktreeLocation | null;
+/** The worktree session the last enter_worktree recorded (the state the tools' texts name). */
+let session: { path: string } | null | undefined;
+const ctx = () => createFakeCtx({ cwd: repo });
+const enter = (params: Record<string, unknown>, context = ctx()) => fake.tools.get("enter_worktree")!.execute("enter", params, undefined, undefined, context) as Promise<Result>;
+const exit = (params: Record<string, unknown>) => fake.tools.get("exit_worktree")!.execute("exit", params, undefined, undefined, ctx()) as Promise<Result>;
+const start = async () => {
+	const result = await enter({ name: "feature" });
+	expect(result.isError).toBeUndefined();
+	session = result.details.worktreeState as typeof session;
+	return join(projectConfigDir(repo), "worktrees", "feature");
+};
+
+beforeEach(() => {
+	root = realpathSync.native(mkdtempSync(join(tmpdir(), "worktree-lifecycle-")));
+	repo = join(root, "repo");
+	mkdirSync(repo);
+	git(repo, "init", "-q");
+	// Windows runners default core.autocrlf to true, which rewrites checkouts with CRLF.
+	git(repo, "config", "core.autocrlf", "false");
+	writeFileSync(join(repo, "a.txt"), "original\n");
+	writeFileSync(join(repo, ".gitignore"), "output.txt\n");
+	git(repo, "add", ".");
+	git(repo, "commit", "-qm", "initial");
+	resetProcessStateForTest();
+	fake = createFakePi();
+	location = null;
+	fake.events.on(WORKTREE_CHANNEL, (data) => { location = data as WorktreeLocation | null; });
+	worktreeExtension(fake.pi as never);
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+describe("worktree lifecycle safety", () => {
+	it("leaves uncommitted work in the original checkout when creating a worktree", async () => {
+		writeFileSync(join(repo, "a.txt"), "uncommitted\n");
+		const path = await start();
+		expect(readFileSync(join(repo, "a.txt"), "utf8")).toBe("uncommitted\n");
+		expect(readFileSync(join(path, "a.txt"), "utf8")).toBe("original\n");
+	});
+
+	it("rejects a non-git directory without changing the session", async () => {
+		const result = await enter({ name: "feature" }, createFakeCtx({ cwd: root }));
+		expect(result.isError).toBe(true);
+		expect(location).toBeNull();
+	});
+
+	it("keeps the main checkout as the isolation root when launched inside another worktree", async () => {
+		const linked = join(root, "linked");
+		git(repo, "worktree", "add", "-qb", "linked", linked);
+		writeFileSync(join(linked, "a.txt"), "linked branch\n");
+		git(linked, "commit", "-qam", "linked change");
+		const result = await enter({ name: "nested" }, createFakeCtx({ cwd: linked }));
+		expect(result.isError).toBeUndefined();
+		expect(readFileSync(join(location!.path, "a.txt"), "utf8")).toBe("linked branch\n");
+		expect(location?.sharedRoot).toBe(repo);
+	});
+
+	it("does not execute repository checkout hooks when creating a worktree", async () => {
+		const hooks = join(repo, ".git", "hooks");
+		writeFileSync(join(hooks, "post-checkout"), "#!/bin/sh\nprintf 'executed' > hook-ran.txt\n", { mode: 0o755 });
+		const path = await start();
+		expect(existsSync(join(path, "hook-ran.txt"))).toBe(false);
+	});
+
+	it("refuses creation when repository filters would execute outside the permission gate", async () => {
+		writeFileSync(join(repo, ".gitattributes"), "a.txt filter=fixture\n");
+		git(repo, "add", ".gitattributes");
+		git(repo, "commit", "-qm", "filter attribute");
+		git(repo, "config", "filter.fixture.smudge", "printf executed > filter-ran.txt; cat");
+		const result = await enter({ name: "feature" });
+		expect(result.isError).toBe(true);
+		expect(result.content[0].text).toBe(worktreeResultText.enter.failed({ kind: "checkoutRunsProgram", program: { kind: "configSetsProgram", key: "filter.smudge" } }));
+		expect(existsSync(join(projectConfigDir(repo), "worktrees", "feature", "filter-ran.txt"))).toBe(false);
+	});
+
+	it("does not replace an existing branch", async () => {
+		git(repo, "branch", "feature");
+		const head = git(repo, "rev-parse", "feature");
+		expect((await enter({ name: "feature" })).isError).toBe(true);
+		expect(git(repo, "rev-parse", "feature")).toBe(head);
+		expect(location).toBeNull();
+	});
+
+	it("removes a worktree holding only ignored build output, as Claude Code does", async () => {
+		const path = await start();
+		writeFileSync(join(path, "output.txt"), "build output\n");
+		const result = await exit({ action: "remove" });
+		expect(result.isError).toBeUndefined();
+		expect(existsSync(path)).toBe(false);
+	});
+
+	it("deletes the cleared branch even when the original checkout moved to a branch without its base", async () => {
+		const path = await start();
+		git(repo, "checkout", "-q", "--orphan", "elsewhere");
+		git(repo, "commit", "-qm", "unrelated root", "--allow-empty");
+		const result = await exit({ action: "remove" });
+		expect(result.isError).toBeUndefined();
+		expect(existsSync(path)).toBe(false);
+		expect(git(repo, "branch", "--list", "feature")).toBe("");
+	});
+
+	it("refuses to remove hidden untracked files without discard consent", async () => {
+		const path = await start();
+		const file = "new.txt";
+		git(repo, "config", "status.showUntrackedFiles", "no");
+		writeFileSync(join(path, file), "user work\n");
+		expect(git(path, "status", "--porcelain")).toBe("");
+		const result = await exit({ action: "remove" });
+		expect(result.isError).toBe(true);
+		expect(existsSync(join(path, file))).toBe(true);
+		expect(location?.path).toBe(path);
+	});
+
+	it("refuses to remove commits on detached HEAD", async () => {
+		const path = await start();
+		git(path, "checkout", "-q", "--detach");
+		writeFileSync(join(path, "a.txt"), "committed work\n");
+		git(path, "commit", "-qam", "detached work");
+		const result = await exit({ action: "remove" });
+		expect(result.isError).toBe(true);
+		expect(existsSync(path)).toBe(true);
+		expect(result.content[0].text).toBe(worktreeResultText.exit.removeRefused({ session: session as never, blockers: [{ kind: "commitsAhead", count: "1", branch: "feature" }] }));
+	});
+
+	it("refuses to remove commits left on its branch after HEAD moves back", async () => {
+		const path = await start();
+		const base = git(path, "rev-parse", "HEAD");
+		writeFileSync(join(path, "a.txt"), "committed work\n");
+		git(path, "commit", "-qam", "branch work");
+		git(path, "checkout", "-q", "--detach", base);
+		expect((await exit({ action: "remove" })).isError).toBe(true);
+		expect(existsSync(path)).toBe(true);
+	});
+
+	it("keeps changed files and commits when exiting with keep", async () => {
+		const path = await start();
+		writeFileSync(join(path, "a.txt"), "committed work\n");
+		git(path, "commit", "-qam", "branch work");
+		writeFileSync(join(path, "new.txt"), "uncommitted\n");
+		const result = await exit({ action: "keep" });
+		expect(result.isError).toBeUndefined();
+		// The re-entry hint names the real argument, not a `{path}` placeholder.
+		expect(session?.path).toBe(path);
+		expect(result.content[0].text).toBe(worktreeResultText.exit.kept({ session: session as never, exists: true }));
+		expect(existsSync(join(path, "new.txt"))).toBe(true);
+		expect(location).toBeNull();
+		const input = { command: "pwd" };
+		await fake.fire("tool_call", { toolName: "bash", toolCallId: "after", input }, ctx());
+		expect(input.command).toBe("pwd");
+	});
+
+	it("clears the active location when worktree removal succeeds but branch deletion fails", async () => {
+		const path = await start();
+		git(path, "branch", "-m", "renamed");
+		const result = await exit({ action: "remove", discard_changes: true });
+		expect(existsSync(path)).toBe(false);
+		expect(location).toBeNull();
+		expect(result.details.worktreeState).toBeNull();
+		// git's own message sits in the middle of the profile's words.
+		const [before, after] = worktreeResultText.exit.branchDeleteFailed({ session: session as never, branch: "feature", osMessage: "GITSAYS" }).split("GITSAYS");
+		expect(after).toBeDefined();
+		expect(result.content[0].text.startsWith(before)).toBe(true);
+		expect(result.content[0].text.endsWith(after)).toBe(true);
+		expect(result.content[0].text).toContain("feature");
+	});
+
+	it("rejects a listed worktree whose directory was removed outside the harness", async () => {
+		const path = join(root, "other");
+		git(repo, "worktree", "add", "-qb", "other", path);
+		rmSync(path, { recursive: true });
+		const result = await enter({ path });
+		expect(result.isError).toBe(true);
+		expect(location).toBeNull();
+	});
+
+	it("blocks tools instead of silently running in the main checkout when the active worktree disappears", async () => {
+		const path = await start();
+		rmSync(path, { recursive: true });
+		for (const toolName of ["Agent", "workflow", "bash", "read"]) {
+			const result = await fake.fireOne<{ block?: boolean; reason?: string }>("tool_call", { toolName, toolCallId: toolName, input: { command: "pwd", path: "a.txt" } }, ctx());
+			expect(result?.block, toolName).toBe(true);
+			expect(result?.reason).toBe(worktreeResultText.activeMissing(session as never));
+		}
+		expect((await exit({ action: "keep" })).details.worktreeState).toBeNull();
+	}, 20_000); // four gated tool calls plus git on a Windows runner take over 5 s
+
+	it("accepts an existing worktree through a symlinked repository path", async () => {
+		const path = await start();
+		await exit({ action: "keep" });
+		const alias = join(root, "alias");
+		symlinkSync(repo, alias, process.platform === "win32" ? "junction" : "dir");
+		const result = await enter({ path: join(projectConfigDir(alias), "worktrees", "feature") });
+		expect(result.isError).toBeUndefined();
+		expect(location?.path).toBe(path);
+	});
+
+	it("restores worktree rewriting from the persisted enter result on resume", async () => {
+		const entered = await enter({ name: "feature" });
+		const path = location!.path;
+		const resumed = createFakePi();
+		worktreeExtension(resumed.pi as never);
+		await resumed.fire("session_start", { reason: "resume" }, createFakeCtx({ cwd: repo, sessionManager: { getBranch: () => [{ type: "message", message: { role: "toolResult", toolName: "enter_worktree", toolCallId: "enter", details: entered.details } }] } }));
+		const input = { path: "a.txt" };
+		await resumed.fire("tool_call", { toolName: "read", toolCallId: "r", input }, ctx());
+		expect(input.path).toBe(join(path, "a.txt"));
+	});
+
+	describe("/clear and /new keep an entered worktree, as Claude Code does (R3-M23)", () => {
+		/** A fresh instance on its own branch, as pi builds one at a session swap; `cwd` is the new session's directory. */
+		const swap = async (reason: string, branch: FakePi["branch"] = [], cwd = repo) => {
+			const next = createFakePi();
+			let seen: WorktreeLocation | null = null;
+			next.events.on(WORKTREE_CHANNEL, (data) => { seen = data as WorktreeLocation | null; });
+			worktreeExtension(next.pi as never);
+			const entries = [...branch];
+			await next.fire("session_start", { reason }, createFakeCtx({ cwd, sessionManager: { getBranch: () => [...entries, ...next.branch] } }));
+			return { next, location: () => seen, branch: () => [...entries, ...next.branch] };
+		};
+
+		it("starts the new branch in the worktree and records it there, so a resume reads it back", async () => {
+			const path = await start();
+			const cleared = await swap("new");
+			expect(cleared.location()?.path).toBe(path);
+			const input = { path: "a.txt" };
+			await cleared.next.fire("tool_call", { toolName: "read", toolCallId: "r", input }, ctx());
+			expect(input.path).toBe(join(path, "a.txt"));
+			// A fresh process resuming the cleared session: nothing carried in memory.
+			resetProcessStateForTest();
+			const resumed = await swap("startup", cleared.branch());
+			expect(resumed.location()?.path).toBe(path);
+		});
+
+		it("keeps nothing after the session exited the worktree", async () => {
+			await start();
+			await exit({ action: "keep" });
+			expect((await swap("new")).location()).toBeNull();
+		});
+
+		it("carries only a /clear or /new, and only into the directory the worktree was entered from", async () => {
+			await start();
+			expect((await swap("new", [], root)).location()).toBeNull();
+			expect((await swap("resume")).location()).toBeNull();
+		});
+
+		it("restores a recorded carry only in the directory the worktree was entered from", async () => {
+			await start();
+			const cleared = await swap("new");
+			resetProcessStateForTest();
+			// The cleared branch run from another directory (a fork into another project).
+			const elsewhere = await swap("startup", cleared.branch(), root);
+			expect(elsewhere.location()).toBeNull();
+			const input = { path: "a.txt" };
+			await elsewhere.next.fire("tool_call", { toolName: "read", toolCallId: "r", input }, createFakeCtx({ cwd: root }));
+			expect(input.path).toBe("a.txt");
+		});
+	});
+});

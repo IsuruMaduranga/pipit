@@ -1,0 +1,233 @@
+import { describe, expect, it } from "vitest";
+import { visibleWidth } from "../../extensions/lib/ui/text-width.ts";
+import { wrapProse } from "../../extensions/lib/ui/tui-render.ts";
+import { randomSlug } from "../../extensions/safety/plan-mode/slug.ts";
+import {
+	clampOffset,
+	decodeViewerKey,
+	initialPlanChoice,
+	planLines,
+	renderPlanViewer,
+	runPlanApproval,
+	selectPlanChoice,
+} from "../../extensions/safety/plan-mode/viewer.ts";
+
+/** The dialog's default choice list when auto mode is available (auto mode leads). */
+const CHOICES = [
+	"Approve — auto mode",
+	"Approve — auto-accept edits",
+	"Approve — manual approvals",
+	"Keep planning",
+] as const;
+
+describe("randomSlug", () => {
+	it("produces three distinct lowercase words joined by dashes", () => {
+		const slug = randomSlug();
+		const words = slug.split("-");
+		expect(words).toHaveLength(3);
+		expect(new Set(words).size).toBe(3);
+		expect(slug).toMatch(/^[a-z]+-[a-z]+-[a-z]+$/);
+	});
+
+	it("is deterministic under an injected rng", () => {
+		let calls = 0;
+		const rng = () => {
+			calls += 1;
+			return (calls * 0.37) % 1;
+		};
+		const a = randomSlug(rng);
+		calls = 0;
+		const b = randomSlug(rng);
+		expect(a).toBe(b);
+	});
+
+	it("skips duplicate picks rather than repeating a word", () => {
+		// An rng stuck on one value would loop forever if duplicates were kept;
+		// step it just enough to eventually move on.
+		const values = [0.1, 0.1, 0.1, 0.2, 0.3];
+		let i = 0;
+		const slug = randomSlug(() => values[Math.min(i++, values.length - 1)]);
+		expect(new Set(slug.split("-")).size).toBe(3);
+	});
+});
+
+describe("plan viewer", () => {
+	const plain = (_color: string, text: string) => text;
+
+	it("wraps long lines and preserves blank lines", () => {
+		const lines = wrapProse(`${"a".repeat(25)}\n\nshort`, 10);
+		expect(lines).toEqual(["a".repeat(10), "a".repeat(10), "a".repeat(5), "", "short"]);
+	});
+
+	// The dialog broke words at the edge ("repo" / "rt") at any width.
+	it("breaks at word boundaries and keeps an indent under its line", () => {
+		expect(wrapProse("verify with make test and report", 16)).toEqual(["verify with make", "test and report"]);
+		expect(wrapProse("  - nested item that wraps", 16)).toEqual(["  - nested item", "  that wraps"]);
+	});
+
+	it("clamps the scroll offset to the content", () => {
+		expect(clampOffset(-3, 20, 10)).toBe(0);
+		expect(clampOffset(99, 20, 10)).toBe(10);
+		expect(clampOffset(2, 5, 10)).toBe(0);
+	});
+
+	it("decodes scroll, choice, pick, confirm, and cancel keys", () => {
+		expect(decodeViewerKey("\x1b[A", 12)).toEqual({ kind: "scroll", delta: -1 });
+		expect(decodeViewerKey("\x1b[6~", 12)).toEqual({ kind: "scroll", delta: 12 });
+		expect(decodeViewerKey("\x1b[C", 12)).toEqual({ kind: "choice", delta: 1 });
+		expect(decodeViewerKey("2", 12)).toEqual({ kind: "pick", index: 1 });
+		expect(decodeViewerKey("\r", 12)).toEqual({ kind: "confirm" });
+		expect(decodeViewerKey("\x1b", 12)).toEqual({ kind: "cancel" });
+		expect(decodeViewerKey("x", 12)).toBeUndefined();
+	});
+
+	it("never renders a line wider than the given width", () => {
+		const width = 24;
+		const content = wrapProse(`# Plan\n${"word ".repeat(40)}\nshort`, width - 1);
+		const lines = renderPlanViewer({ lines: content, offset: 0, choice: 0, choices: CHOICES }, plain, width);
+		for (const line of lines) {
+			expect([...line].length, JSON.stringify(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
+	// The divider was a fixed 72 columns on a 160-column screen.
+	it("sizes both dividers to the width", () => {
+		for (const width of [40, 160]) {
+			const out = renderPlanViewer({ lines: ["plan"], offset: 0, choice: 0, choices: CHOICES }, plain, width);
+			const rules = out.filter((line) => /^─+$/.test(line));
+			expect(rules).toEqual(["─".repeat(width), "─".repeat(width)]);
+		}
+	});
+
+	it("wraps its key hints on a narrow terminal instead of cutting esc cancel", () => {
+		const out = renderPlanViewer({ lines: ["plan"], offset: 0, choice: 0, choices: CHOICES }, plain, 30);
+		const lastChoice = out.findLastIndex((line) => /^. \d\. /.test(line));
+		const hints = out.slice(lastChoice + 1).filter(Boolean);
+		expect(hints.length).toBeGreaterThan(1);
+		expect(hints.join(" · ")).toContain("esc cancel");
+	});
+
+	// Seen on a real Windows screen: with the choice keys only above a long plan, ←/→ was not obvious.
+	it("puts the choice keys directly under the choices and the scroll key above the plan", () => {
+		const out = renderPlanViewer({ lines: ["plan"], offset: 0, choice: 0, choices: CHOICES }, plain, 80);
+		const lastChoice = out.findLastIndex((line) => /^. \d\. /.test(line));
+		expect(out[lastChoice + 1]).toBe("←/→ choose · 1-4 pick · enter confirm · esc cancel");
+		expect(out[2]).toBe("↑/↓ scroll the plan");
+	});
+
+	// Markdown output is painted: an overwide painted line is cut ANSI-aware, never past the width.
+	it("keeps painted plan lines within the width", () => {
+		const painted = `\x1b[1m${"bold ".repeat(20)}\x1b[22m`;
+		const out = renderPlanViewer({ lines: [painted], offset: 0, choice: 0, choices: CHOICES }, plain, 30);
+		for (const line of out) expect(visibleWidth(line), JSON.stringify(line)).toBeLessThanOrEqual(30);
+	});
+
+	it("renders the plan through the Markdown renderer when there is one, else wraps it plain", () => {
+		const seen: Array<[string, number]> = [];
+		const markdown = (text: string, width: number) => (seen.push([text, width]), ["\x1b[1mContext:\x1b[22m it"]);
+		expect(planLines("**Context:** it", 40, markdown)).toEqual(["\x1b[1mContext:\x1b[22m it"]);
+		expect(seen).toEqual([["**Context:** it", 40]]);
+		expect(planLines("verify with make test and report", 16)).toEqual(["verify with make", "test and report"]);
+	});
+
+	it("falls back to the plain wrap when the Markdown renderer throws", () => {
+		const broken = () => {
+			throw new Error("Theme not initialized");
+		};
+		expect(planLines("  - nested item that wraps", 16, broken)).toEqual(["  - nested item", "  that wraps"]);
+	});
+
+	it("windows the content and reports the scroll position", () => {
+		const content = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+		const out = renderPlanViewer(
+			{ lines: content, offset: 5, choice: 3, choices: CHOICES, maxVisible: 10 },
+			plain,
+			80,
+		);
+		expect(out).toContain("line 6");
+		expect(out).not.toContain("line 5");
+		expect(out).not.toContain("line 16");
+		expect(out.some((l) => l.includes("lines 6–15 of 30"))).toBe(true);
+		expect(out.some((l) => l.includes("❯ 4. Keep planning"))).toBe(true);
+	});
+
+	it("leads the choice list with auto mode and numbers each choice", () => {
+		const out = renderPlanViewer({ lines: ["plan"], offset: 0, choice: 0, choices: CHOICES }, plain, 80);
+		expect(out.some((l) => l.includes("❯ 1. Approve — auto mode"))).toBe(true);
+		expect(out.some((l) => l.includes("2. Approve — auto-accept edits"))).toBe(true);
+		expect(out.some((l) => l.includes("1-4 pick"))).toBe(true);
+	});
+});
+
+describe("initialPlanChoice", () => {
+	it("highlights manual approvals even when auto mode leads the list", () => {
+		// Enter without arrowing must approve into manual mode — never silently
+		// switch the session into auto mode (the pre-auto-option behavior).
+		const options = [{ mode: "auto" }, { mode: "acceptEdits" }, { mode: "default" }, {}];
+		expect(initialPlanChoice(options)).toBe(2);
+	});
+
+	it("highlights manual approvals when auto mode is unavailable", () => {
+		expect(initialPlanChoice([{ mode: "acceptEdits" }, { mode: "default" }, {}])).toBe(1);
+	});
+
+	it("falls back to the first option when no manual choice exists", () => {
+		expect(initialPlanChoice([{ mode: "acceptEdits" }, {}])).toBe(0);
+	});
+});
+
+describe("runPlanApproval", () => {
+	const OPTIONS = [{ mode: "acceptEdits" }, { mode: "default" }, {}];
+	/** A dialog that answers each showing from `replies` in turn, counting the showings. */
+	const dialog = (...replies: Array<number | null>) => {
+		const shown = { count: 0 };
+		return { shown, show: async () => replies[shown.count++] ?? null };
+	};
+
+	it("approves with the picked option without asking anything", async () => {
+		const d = dialog(1);
+		const ask = async () => "unused";
+		expect(await runPlanApproval(OPTIONS, d.show, ask)).toEqual({ kind: "approve", index: 1 });
+	});
+
+	// Claude Code's "No, keep planning" is a text input: the words go back to the model.
+	it("asks what to change on keep planning and carries the trimmed answer", async () => {
+		expect(await runPlanApproval(OPTIONS, dialog(2).show, async () => "  name it greet.txt  ")).toEqual({ kind: "reject", feedback: "name it greet.txt" });
+	});
+
+	it("reopens the dialog on a blank answer, as Claude Code ignores Enter on an empty input", async () => {
+		const d = dialog(2, 0);
+		expect(await runPlanApproval(OPTIONS, d.show, async () => "   ")).toEqual({ kind: "approve", index: 0 });
+		expect(d.shown.count).toBe(2);
+	});
+
+	it("rejects without words on Esc, on the dialog or on the question", async () => {
+		expect(await runPlanApproval(OPTIONS, dialog(null).show, async () => "unused")).toEqual({ kind: "reject" });
+		expect(await runPlanApproval(OPTIONS, dialog(2).show, async () => undefined)).toEqual({ kind: "reject" });
+	});
+
+	it("rejects without words when the turn is stopped mid-question", async () => {
+		const abort = new AbortController();
+		const ask = async () => (abort.abort(), "typed before the stop");
+		expect(await runPlanApproval(OPTIONS, dialog(2).show, ask, abort.signal)).toEqual({ kind: "reject" });
+	});
+});
+
+describe("selectPlanChoice (RPC)", () => {
+	const choices = ["Approve — Auto mode", "Approve — Default mode", "Keep planning"];
+	const ui = (reply: string | undefined) => {
+		const seen: Array<{ title: string; options: string[] }> = [];
+		return { seen, select: async (title: string, options: string[]) => (seen.push({ title, options }), reply) };
+	};
+
+	it("asks with the plan in the title and returns the picked index", async () => {
+		const client = ui("Approve — Default mode");
+		expect(await selectPlanChoice(client, "1. Do it", "/plans/x.md", choices)).toBe(1);
+		expect(client.seen).toEqual([{ title: "Plan (/plans/x.md):\n\n1. Do it\n\nApprove the plan?", options: choices }]);
+	});
+
+	it("reads a dismissal or an unknown reply as no choice", async () => {
+		expect(await selectPlanChoice(ui(undefined), "p", "/x.md", choices)).toBeNull();
+		expect(await selectPlanChoice(ui("Approve"), "p", "/x.md", choices)).toBeNull();
+	});
+});

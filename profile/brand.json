@@ -1,0 +1,34 @@
+{
+	"name": "Pipit",
+	"idPrefix": "pipit",
+	"bin": "pipit",
+	"envPrefix": "PIPIT",
+	"stateDir": ".pipit",
+	"productFile": "PIPIT.md",
+	"theme": "pipit",
+	"homepage": "https://github.com/wso2/pipit",
+	"subtitle": "the coding agent for WSO2 Integrator (code name)",
+	"spinnerVerbs": ["Integrating"],
+	"wordmark": [
+		"██████╗ ██╗██████╗ ██╗████████╗",
+		"██╔══██╗██║██╔══██╗██║╚══██╔══╝",
+		"██████╔╝██║██████╔╝██║   ██║",
+		"██╔═══╝ ██║██╔═══╝ ██║   ██║",
+		"██║     ██║██║     ██║   ██║",
+		"╚═╝     ╚═╝╚═╝     ╚═╝   ╚═╝"
+	],
+	"packages": {
+		"app": "@wso2/pipit",
+		"extension": "@wso2/pipit-extension"
+	},
+	"packageInfo": {
+		"app": {
+			"description": "Pipit (code name): the terminal coding agent for WSO2 Integrator. Ships its own pinned pi harness and keeps its state in ~/.pipit.",
+			"keywords": ["wso2", "ballerina", "integration", "coding-agent", "cli", "agent"]
+		},
+		"extension": {
+			"description": "Pipit (code name) as a pi package: the WSO2 Integrator coding agent on your own pi install. For the bundled app, install `@wso2/pipit` instead.",
+			"keywords": ["wso2", "ballerina", "integration", "pi-package", "pi-extension", "coding-agent"]
+		}
+	}
+}

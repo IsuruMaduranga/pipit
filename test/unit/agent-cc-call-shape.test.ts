@@ -1,0 +1,135 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { validateToolArguments } from "@earendil-works/pi-ai";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { decide, extractSubject, parseRules } from "../../extensions/lib/rules/matcher.ts";
+import { prepareAgentArguments } from "../../extensions/agents/subagents/agent-args.ts";
+import subagentsExtension from "../../extensions/agents/subagents/index.ts";
+import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
+import { subagentResultText } from "../../extensions/lib/agents/subagent-text.ts";
+import { requireText } from "../../extensions/lib/profile/profile.ts";
+
+/**
+ * Claude Code's Agent tool takes `prompt` (the task) and `description` (a short
+ * title), and requires the task. One Code's tool was renamed to CC's surface but
+ * kept `task`; a CC-trained model's `{subagent_type, description, prompt}` used
+ * to pass pi's validation (unknown keys are not rejected) with `task` undefined,
+ * so the child was prompted with an empty string and no error surfaced
+ * (TOOL-FIDELITY-REVIEW-2026-09-07 H1). These lock the two paths that don't
+ * spawn a child: the fail-loud on a missing task, and that `prompt` is accepted
+ * as the task (an unknown agent then fails, proving the task was read, not the
+ * empty-task path).
+ */
+function agentTool() {
+	const fake = createFakePi();
+	subagentsExtension(fake.pi as never);
+	const tool = fake.tools.get("Agent");
+	if (!tool) throw new Error("Agent tool not registered");
+	return tool;
+}
+
+const run = (params: Record<string, unknown>) =>
+	agentTool().execute("call-1", params, undefined, undefined, createFakeCtx());
+
+const text = (result: unknown) => {
+	const content = (result as { content?: Array<{ text?: string }> }).content ?? [];
+	return content.map((c) => c.text ?? "").join("");
+};
+
+const refused = (refusal: Parameters<ReturnType<typeof subagentResultText>["refused"]>[0]) => subagentResultText().refused(refusal);
+
+describe("Agent tool, Claude Code call shape (H1)", () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it("fails loud when a run names an agent but has no task", async () => {
+		const result = (await run({ subagent_type: "general-purpose" })) as { isError?: boolean };
+		expect(result.isError).toBe(true);
+		expect(text(result)).toBe(refused({ kind: "taskRequired" }));
+	});
+
+	// Battery round 7: DeepSeek V3.2 repeated a run without `subagent_type` up to
+	// 30 times against an error naming the fix. Claude Code starts
+	// general-purpose; so does One Code.
+	it("starts general-purpose when a run names no agent", async () => {
+		// The worktree check comes after the agent lookup, so reaching it proves
+		// the run found its agent.
+		const cwd = mkdtempSync(join(tmpdir(), "agent-default-"));
+		const tool = agentTool() as unknown as { prepareArguments: (a: unknown) => unknown; execute: (...a: unknown[]) => Promise<unknown> };
+		const result = await tool.execute("call-1", tool.prepareArguments({ task: "Read the git history.", isolation: "worktree" }), undefined, undefined, createFakeCtx({ cwd }));
+		rmSync(cwd, { recursive: true, force: true });
+		expect(text(result)).toBe(refused({ kind: "worktreeNeedsGit" }));
+	});
+
+	// The default is set before the gate, so a deny rule naming the agent stops
+	// a call that leaves the type out.
+	it("gives the gate the default agent, so an Agent(general-purpose) deny rule holds", () => {
+		const prepared = prepareAgentArguments({ prompt: "Read the git history." }) as Record<string, unknown>;
+		expect(prepared.subagent_type).toBe("general-purpose");
+		const subject = extractSubject("Agent", prepared);
+		const decision = decide({ toolName: "Agent", subject, cwd: process.cwd(), mode: "default", deny: parseRules(["Agent(general-purpose)"]), ask: [], allow: [] });
+		expect(decision.decision).toBe("deny");
+	});
+
+	it("leaves a catalog listing without an agent type", () => {
+		expect((prepareAgentArguments({ action: "list" }) as Record<string, unknown>).subagent_type).toBeUndefined();
+		expect((prepareAgentArguments({}) as Record<string, unknown>).subagent_type).toBeUndefined();
+		expect((prepareAgentArguments({ subagent_type: "explore", task: "x" }) as Record<string, unknown>).subagent_type).toBe("explore");
+	});
+
+	it("rejects a blank task rather than spawning an empty child", async () => {
+		const result = (await run({ subagent_type: "general-purpose", prompt: "   " })) as { isError?: boolean };
+		expect(result.isError).toBe(true);
+		expect(text(result)).toBe(refused({ kind: "taskRequired" }));
+	});
+
+	it("accepts `prompt` as the task (CC's name), reaching agent validation", async () => {
+		// A CC-shaped call whose agent name is unknown must fail at agent lookup,
+		// NOT at the empty-task guard — proving `prompt` was read as the task.
+		const refusedSpy = vi.spyOn(subagentResultText(), "refused");
+		const result = (await run({
+			subagent_type: "does-not-exist",
+			description: "Audit auth",
+			prompt: "Audit the authentication flow for bypasses.",
+		})) as { isError?: boolean };
+		expect(result.isError).toBe(true);
+		expect(refusedSpy).toHaveBeenCalledTimes(1);
+		expect(refusedSpy).toHaveBeenCalledWith(expect.objectContaining({ kind: "unknownAgents", names: ["does-not-exist"] }));
+		expect(text(result)).toBe(refusedSpy.mock.results[0].value);
+	});
+});
+
+/**
+ * The schema requires `task` (a weak model sent run options without one, again
+ * and again, while it was optional). pi runs prepareArguments before
+ * validating, so `prompt` and `action: "list"` still pass.
+ */
+describe("Agent tool, required task", () => {
+	const validate = (args: Record<string, unknown>) => {
+		const tool = agentTool() as unknown as { name: string; parameters: unknown; prepareArguments?: (a: unknown) => unknown };
+		const prepared = tool.prepareArguments ? tool.prepareArguments(args) : args;
+		return () => validateToolArguments(tool as never, { type: "toolCall", id: "c1", name: "Agent", arguments: prepared } as never);
+	};
+
+	it("marks task required in the schema", () => {
+		expect((agentTool() as unknown as { parameters: { required?: string[] } }).parameters.required).toContain("task");
+	});
+
+	it("rejects a run with no task before execute", () => {
+		expect(validate({ subagent_type: "explore", name: "x", action: "run" })).toThrow(/task/);
+	});
+
+	it("accepts Claude Code's prompt as the task", () => {
+		expect(validate({ subagent_type: "explore", description: "Find X", prompt: "Find X" })()).toMatchObject({ task: "Find X" });
+	});
+
+	it("accepts a catalog list without a task", () => {
+		expect(validate({ action: "list" })()).toMatchObject({ action: "list", task: "" });
+	});
+
+	it("leaves an explicit task and non-objects alone", () => {
+		const args = { subagent_type: "explore", task: "Do it", prompt: "other" };
+		expect(prepareAgentArguments(args)).toBe(args);
+		expect(prepareAgentArguments("nope")).toBe("nope");
+	});
+});

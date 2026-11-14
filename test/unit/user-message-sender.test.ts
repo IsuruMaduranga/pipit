@@ -1,0 +1,153 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ONE_SHOT_COMMAND_FAILED_CHANNEL } from "../../extensions/lib/notify/interrupt.ts";
+import { createUserMessageSender } from "../../extensions/lib/notify/notifications.ts";
+import { createFakePi } from "./helpers/fake-pi.ts";
+import { captureUserTurns } from "./helpers/user-turn.ts";
+
+let exitCode: typeof process.exitCode;
+beforeEach(() => { exitCode = process.exitCode; process.exitCode = undefined; });
+afterEach(() => { vi.useRealTimers(); process.exitCode = exitCode; });
+
+describe("createUserMessageSender", () => {
+	it.each(["print", "json"] as const)("waits through idle preflight and the whole run in %s", async (mode) => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		const startTurn = captureUserTurns(fake);
+		const send = createUserMessageSender(fake.pi as never);
+		let active = false;
+		let settle!: () => void;
+		const idle = new Promise<void>((resolve) => { settle = resolve; });
+		const waitForIdle = vi.fn(() => active ? idle : Promise.resolve());
+		let returned = false;
+		const running = send({ mode, isIdle: () => !active, waitForIdle }, "prompt").then(() => { returned = true; });
+		await vi.advanceTimersByTimeAsync(500);
+		await fake.fire("before_agent_start", {});
+		expect(returned).toBe(false);
+		expect(waitForIdle).not.toHaveBeenCalled();
+		active = true;
+		await startTurn();
+		expect(waitForIdle).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(60_000); // The startup timeout must not cap the model/tool run.
+		expect(returned).toBe(false);
+		settle();
+		await running;
+		expect(returned).toBe(true);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("arms before sending and handles a turn already settled by the wait", async () => {
+		const fake = createFakePi();
+		fake.pi.sendUserMessage = () => { void fake.fire("agent_start", {}); };
+		const send = createUserMessageSender(fake.pi as never);
+		const waitForIdle = vi.fn(async () => {});
+		await send({ mode: "json", isIdle: () => true, waitForIdle }, "prompt");
+		expect(waitForIdle).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["tui", "rpc"] as const)("does not wait or hold a timer in %s", async (mode) => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		const send = createUserMessageSender(fake.pi as never);
+		const isIdle = vi.fn(() => true);
+		const waitForIdle = vi.fn(async () => {});
+		await send({ mode, isIdle, waitForIdle }, "prompt", { deliverAs: "followUp" });
+		expect(fake.sentUserMessages).toEqual([{ content: "prompt", options: { deliverAs: "followUp" } }]);
+		expect(isIdle).not.toHaveBeenCalled();
+		expect(waitForIdle).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("bounds a preflight failure or consumed input, clears timers, and can send again", async () => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		const startTurn = captureUserTurns(fake);
+		const send = createUserMessageSender(fake.pi as never);
+		const failedCommand = vi.fn();
+		fake.events.on(ONE_SHOT_COMMAND_FAILED_CHANNEL, failedCommand);
+		const exitCode = process.exitCode;
+		const ctx = { mode: "json" as const, isIdle: () => true, waitForIdle: vi.fn(async () => {}) };
+		const failed = expect(send(ctx, "consumed")).rejects.toThrow("Check model authentication and extension input hooks");
+		await vi.advanceTimersByTimeAsync(30_000);
+		await failed;
+		expect(failedCommand).toHaveBeenCalledOnce();
+		// A child may use the sender too: only its local bus hears the failure.
+		expect(process.exitCode).toBe(exitCode);
+		expect(ctx.waitForIdle).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+		const running = send(ctx, "next prompt");
+		await vi.advanceTimersByTimeAsync(0);
+		await startTurn();
+		await running;
+		expect(ctx.waitForIdle).toHaveBeenCalledTimes(1);
+		expect(fake.handlers.get("agent_start")).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("reports a failed command again after a replacement session starts", async () => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		const send = createUserMessageSender(fake.pi as never);
+		const failedCommand = vi.fn();
+		fake.events.on(ONE_SHOT_COMMAND_FAILED_CHANNEL, failedCommand);
+		await fake.fire("session_shutdown", {});
+		await fake.fire("session_start", { reason: "new" });
+		const failed = expect(send({ mode: "json", isIdle: () => true, waitForIdle: vi.fn(async () => {}) }, "consumed")).rejects.toThrow();
+		await vi.advanceTimersByTimeAsync(30_000);
+		await failed;
+		expect(failedCommand).toHaveBeenCalledOnce();
+	});
+
+	it("rejects shutdown during preflight without using the stale context", async () => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		const send = createUserMessageSender(fake.pi as never);
+		const waitForIdle = vi.fn(async () => {});
+		const failedCommand = vi.fn();
+		fake.events.on(ONE_SHOT_COMMAND_FAILED_CHANNEL, failedCommand);
+		const failed = expect(send({ mode: "print", isIdle: () => true, waitForIdle }, "prompt")).rejects.toThrow("Session shut down");
+		await fake.fire("session_shutdown", {});
+		await failed;
+		expect(failedCommand).not.toHaveBeenCalled();
+		await fake.fire("agent_start", {});
+		expect(waitForIdle).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("keeps listener and timer counts constant across many calls", async () => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		fake.pi.sendUserMessage = () => { void fake.fire("agent_start", {}); };
+		const send = createUserMessageSender(fake.pi as never);
+		const ctx = { mode: "json" as const, isIdle: () => true, waitForIdle: async () => {} };
+		for (let i = 0; i < 100; i++) await send(ctx, `prompt ${i}`);
+		expect(fake.handlers.get("agent_start")).toHaveLength(1);
+		expect(fake.handlers.get("session_shutdown")).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("does not send again after shutdown, even in interactive modes", async () => {
+		const fake = createFakePi();
+		const send = createUserMessageSender(fake.pi as never);
+		await fake.fire("session_shutdown", {});
+		await expect(send({ mode: "rpc", isIdle: () => true }, "late prompt")).rejects.toThrow("Session shut down");
+		expect(fake.sentUserMessages).toEqual([]);
+	});
+
+	it("preserves an existing failure exit status", async () => {
+		const fake = createFakePi();
+		fake.pi.sendUserMessage = () => { throw new Error("send failed"); };
+		const send = createUserMessageSender(fake.pi as never);
+		process.exitCode = 2;
+		await expect(send({ mode: "print", isIdle: () => true }, "prompt")).rejects.toThrow("send failed");
+		expect(process.exitCode).toBe(2);
+	});
+
+	it("cleans up if sending throws synchronously", async () => {
+		vi.useFakeTimers();
+		const fake = createFakePi();
+		fake.pi.sendUserMessage = () => { throw new Error("send failed"); };
+		const send = createUserMessageSender(fake.pi as never);
+		await expect(send({ mode: "json", isIdle: () => true }, "prompt")).rejects.toThrow("send failed");
+		expect(vi.getTimerCount()).toBe(0);
+	});
+});

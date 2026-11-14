@@ -1,0 +1,202 @@
+/**
+ * Claude Code's SubagentHandback for every child session
+ * (lib/agents/subagent-handback.ts): the tool, its closing reminder, the turn
+ * tracker that reports a handed-back report (and falls back to the child's
+ * final text), and the two runners that wire it in. Real pi SDK sessions on a
+ * temp agent dir with no model: `prompt` is spied, and the spy calls the
+ * child's own SubagentHandback tool.
+ */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentSession } from "@earendil-works/pi-coding-agent";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { DEFER_CHANNEL } from "../../extensions/lib/request/deferred.ts";
+import { requireText } from "../../extensions/lib/profile/profile.ts";
+import { REMINDER_CHANNEL } from "../../extensions/lib/request/reminders.ts";
+import { oneTurnHandbackSlot, subagentHandbackExtension, subagentHandbackTool } from "../../extensions/lib/agents/subagent-handback.ts";
+import { childToolAllowlist } from "../../extensions/lib/agents/agent-catalog.ts";
+import { forkTaskMessage } from "../../extensions/agents/subagents/outcome.ts";
+import { SubagentRuntime } from "../../extensions/agents/subagents/runner.ts";
+import { SessionTurnTracker } from "../../extensions/agents/subagents/session-turns.ts";
+import { AgentRunner } from "../../extensions/agents/workflow/agent-session.ts";
+import { createFakePi } from "./helpers/fake-pi.ts";
+import { handbackResultText } from "../../extensions/lib/agents/handback-text.ts";
+import { subagentResultText } from "../../extensions/lib/agents/subagent-text.ts";
+
+type ToolResult = { content: Array<{ text: string }>; isError?: boolean; terminate?: boolean };
+
+const handback = requireText("handback");
+
+describe("the SubagentHandback tool", () => {
+	it("carries the profile's description and parameter text, and a strict one-field schema", () => {
+		const tool = subagentHandbackTool(oneTurnHandbackSlot());
+		expect(tool.name).toBe("SubagentHandback");
+		expect(tool.description).toBe(handback.description);
+		const schema = tool.parameters as unknown as { type: string; properties: Record<string, { type: string; description: string }>; required: string[]; additionalProperties: boolean };
+		expect(schema.properties).toEqual({ message: expect.objectContaining({ type: "string", description: handback.messageParam }) });
+		expect(schema.required).toEqual(["message"]);
+		expect(schema.additionalProperties).toBe(false);
+	});
+
+	it("points a subagent, which can still message its caller, at SendMessage after a second report", async () => {
+		const slot = oneTurnHandbackSlot();
+		const tool = subagentHandbackTool(slot, true);
+		await tool.execute("c1", { message: "Report." }, undefined, undefined, undefined as never);
+		const again = (await tool.execute("c2", { message: "More." }, undefined, undefined, undefined as never)) as { content: { text: string }[] };
+		expect(again.content[0].text).toBe(handbackResultText.alreadyDelivered({ sendMessage: true }));
+	});
+
+	it("records the report once and ends the run", async () => {
+		const slot = oneTurnHandbackSlot();
+		const tool = subagentHandbackTool(slot);
+		const run = (message: unknown) => tool.execute("h", { message } as never, undefined, undefined, {} as never) as Promise<ToolResult>;
+
+		const delivered = await run("The file is app.py.");
+		expect(delivered.content[0].text).toBe(handbackResultText.delivered);
+		expect(delivered.terminate).toBe(true);
+		expect(delivered.isError).toBeUndefined();
+		expect(slot.report).toBe("The file is app.py.");
+
+		const again = await run("a second report");
+		expect(again).toMatchObject({ isError: true });
+		expect(again.content[0].text).toBe(handbackResultText.alreadyDelivered({ sendMessage: false }));
+		expect(slot.report).toBe("The file is app.py.");
+	});
+
+	it("fails loud on an empty report, with the fix named", async () => {
+		const slot = oneTurnHandbackSlot();
+		const result = (await subagentHandbackTool(slot).execute("h", { message: "  " } as never, undefined, undefined, {} as never)) as ToolResult;
+		expect(result).toMatchObject({ isError: true });
+		expect(result.content[0].text).toBe(handbackResultText.empty);
+		expect(slot.report).toBeUndefined();
+	});
+});
+
+describe("the hand-back extension a child loads", () => {
+	it("registers the tool and puts the closing reminder on the child's messages from session start", async () => {
+		const fake = createFakePi();
+		const reminders: unknown[] = [];
+		const deferred: unknown[] = [];
+		fake.events.on(REMINDER_CHANNEL, (data) => reminders.push(data));
+		fake.events.on(DEFER_CHANNEL, (data) => deferred.push(data));
+		subagentHandbackExtension(oneTurnHandbackSlot())(fake.pi as never);
+		expect(fake.tools.has("SubagentHandback")).toBe(true);
+		expect(deferred).toEqual([]);
+		expect(reminders).toEqual([]);
+		await fake.fire("session_start", { reason: "startup" });
+		expect(reminders).toEqual([{ text: handbackResultText.reminder, key: "subagent-handback", placement: "sticky-append" }]);
+	});
+
+	it("defers the tool in a fork, which sends the parent's tool list", () => {
+		const fake = createFakePi();
+		const deferred: Array<{ name: string }> = [];
+		fake.events.on(DEFER_CHANNEL, (data) => deferred.push(data as { name: string }));
+		subagentHandbackExtension(oneTurnHandbackSlot(), { deferred: true })(fake.pi as never);
+		expect(deferred.map((d) => d.name)).toEqual(["SubagentHandback"]);
+	});
+
+	it("an agent file's tools allowlist keeps it, and a fork's framing points at it", () => {
+		expect(childToolAllowlist(["Read"])).toContain("SubagentHandback");
+		expect(forkTaskMessage("do it")).toBe(requireText("subagents").forkTask({ task: "do it", isolation: undefined }));
+	});
+});
+
+describe("SessionTurnTracker: the handed-back report is the turn's result", () => {
+	const assistant = (text: string) => ({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } });
+
+	it("reports the hand-back over the final text, and the final text when the tool was never called", () => {
+		const tracker = new SessionTurnTracker();
+		tracker.process(assistant("Done, see the report."));
+		expect(tracker.recordHandback("The report.")).toBe(true);
+		expect(tracker.recordHandback("Another.")).toBe(false);
+		tracker.process({ type: "agent_settled" });
+		expect(tracker.turnOutcome().output).toBe("The report.");
+		expect(tracker.transcript).toBe("The report.");
+
+		// The next turn starts without a report and falls back to its text.
+		tracker.beginTurn();
+		tracker.process(assistant("Plain answer."));
+		tracker.process({ type: "agent_settled" });
+		expect(tracker.turnOutcome().output).toBe("Plain answer.");
+		expect(tracker.transcript).toBe("The report.\n\n---\n\nPlain answer.");
+	});
+
+	it("an aborted turn stays failed even after a hand-back", () => {
+		const tracker = new SessionTurnTracker();
+		tracker.recordHandback("Partial.");
+		tracker.markAborted();
+		expect(tracker.turnOutcome()).toMatchObject({ failed: true, output: subagentResultText().failure({ kind: "aborted", why: "stopped", output: "Partial." }) });
+	});
+});
+
+describe("the runners give every child the hand-back", () => {
+	let agentDir: string;
+	let cwd: string;
+	beforeAll(() => {
+		agentDir = mkdtempSync(join(tmpdir(), "handback-agent-"));
+		cwd = mkdtempSync(join(tmpdir(), "handback-cwd-"));
+		mkdirSync(join(cwd, ".claude", "agents"), { recursive: true });
+		writeFileSync(join(cwd, ".claude", "agents", "hb-reader.md"), "---\nname: hb-reader\ntools: Read\n---\nYou read.");
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	});
+	afterAll(() => {
+		vi.unstubAllEnvs();
+		rmSync(agentDir, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	});
+	afterEach(() => vi.restoreAllMocks());
+
+	/** A child that hands its report back through its own tool, then writes other text. */
+	const handBackInPrompt = (report: string) =>
+		vi.spyOn(AgentSession.prototype, "prompt").mockImplementation(async function (this: AgentSession) {
+			const tool = this.getToolDefinition("SubagentHandback");
+			if (!tool) throw new Error("no SubagentHandback in the child");
+			if (!this.getActiveToolNames().includes("SubagentHandback")) throw new Error("SubagentHandback is not active");
+			await tool.execute("h1", { message: report } as never, undefined, undefined, {} as never);
+			this.messages.push({ role: "assistant", content: [{ type: "text", text: "plain text the caller never sees" }] } as never);
+		});
+
+	it("an Agent run returns the handed-back report", async () => {
+		handBackInPrompt("Report from the subagent.");
+		const runtime = await SubagentRuntime.create(cwd);
+		const outcome = await runtime.run({ cwd, task: "find it", onProgress: () => {} }).result;
+		expect(outcome.output).toBe("Report from the subagent.");
+		expect(outcome.failed).toBeUndefined();
+	});
+
+	it("keeps the tool for an agent whose tools allowlist leaves it out", async () => {
+		handBackInPrompt("Reader's report.");
+		const runtime = await SubagentRuntime.create(cwd);
+		const agent = { name: "hb-reader", description: "", tools: ["read"], systemPrompt: "You read.", source: "project" };
+		const outcome = await runtime.run({ cwd, task: "read it", agent: agent as never, onProgress: () => {} }).result;
+		expect(outcome.output).toBe("Reader's report.");
+	});
+
+	it("a workflow agent returns the handed-back report, not its last message", async () => {
+		handBackInPrompt("Workflow agent's report.");
+		const runner = await AgentRunner.create({ cwd, defaultModel: undefined });
+		const { value } = await runner.run("tabulate", {}, new AbortController().signal);
+		expect(value).toBe("Workflow agent's report.");
+	});
+
+	it("a workflow agent without a hand-back still returns its last message", async () => {
+		vi.spyOn(AgentSession.prototype, "prompt").mockImplementation(async function (this: AgentSession) {
+			this.messages.push({ role: "assistant", content: [{ type: "text", text: "The last message." }] } as never);
+		});
+		const runner = await AgentRunner.create({ cwd, defaultModel: undefined });
+		const { value } = await runner.run("tabulate", {}, new AbortController().signal);
+		expect(value).toBe("The last message.");
+	});
+
+	it("a schema'd workflow agent hands back through structured_output and gets no SubagentHandback", async () => {
+		const seen: string[][] = [];
+		vi.spyOn(AgentSession.prototype, "prompt").mockImplementation(async function (this: AgentSession) {
+			seen.push(this.getAllTools().map((t) => t.name));
+		});
+		const runner = await AgentRunner.create({ cwd, defaultModel: undefined });
+		await runner.run("tabulate", { schema: { type: "object", properties: { a: { type: "string" } } } }, new AbortController().signal).catch(() => undefined);
+		expect(seen[0]).toContain("structured_output");
+		expect(seen[0]).not.toContain("SubagentHandback");
+	});
+});

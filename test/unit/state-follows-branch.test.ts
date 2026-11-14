@@ -1,0 +1,241 @@
+/**
+ * Durable session state follows the branch (design.md section 4.3, decided
+ * with the user in section 13): the latest `one-code:state` entry on the
+ * branch wins at a resume, /reload, a fork and a /tree switch. Regression
+ * cases for round-1 H4 (the permission mode came back as the settings default)
+ * and H3 (a resume revived ultracode's standing block while the mode was off).
+ */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import effortExtension from "../../extensions/ui/effort/index.ts";
+import { makeRecord, RECORD } from "../../extensions/lib/request/ledger/records.ts";
+import { MODE_CHANNEL } from "../../extensions/lib/rules/plan-mode-channels.ts";
+import { requireText } from "../../extensions/lib/profile/profile.ts";
+import { REMINDER_CHANNEL, type ReminderPayload } from "../../extensions/lib/request/reminders.ts";
+import permissionsExtension from "../../extensions/safety/permissions/index.ts";
+import { PERMISSION_STATUS_CHANNEL, type PermissionStatus } from "../../extensions/lib/rules/modes.ts";
+import { MODE_ENV } from "../../extensions/lib/agents/permission-gate.ts";
+import type { ToldFact } from "../../extensions/lib/request/ledger/records.ts";
+import { createFakeCtx, createFakePi, renderRequest } from "./helpers/fake-pi.ts";
+import { stateEntry } from "./helpers/state-entry.ts";
+import { brand, envName } from "../../extensions/lib/profile/brand.mjs";
+import { permissionText } from "../../extensions/lib/rules/permission-text.ts";
+
+/** A request recorded on the branch: its model was told the mode in force. */
+const requestEntry = {
+	type: "custom",
+	id: "r1",
+	parentId: null,
+	customType: RECORD.request,
+	data: makeRecord("request", "0.6.0", { identity: { api: "anthropic-messages", provider: "anthropic", model: "claude-haiku", auth: "key" }, keep: 0, append: [], head: "h", blobs: {}, consumed: [] }),
+};
+
+describe("the permission mode follows the branch (H4)", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "mode-follows-"));
+		vi.stubEnv(envName("STATE_DIR"), join(dir, brand.stateDir));
+		vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
+		vi.stubEnv(MODE_ENV, "");
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	async function start(branch: unknown[], flags: Record<string, string | boolean> = {}, reason = "startup", reminders?: ReminderPayload[]) {
+		const fake = createFakePi();
+		if (reminders) fake.events.on(REMINDER_CHANNEL, (data) => reminders.push(data as ReminderPayload));
+		for (const [name, value] of Object.entries(flags)) fake.flags.set(name, value);
+		const modes: string[] = [];
+		fake.events.on(PERMISSION_STATUS_CHANNEL, (data) => modes.push((data as PermissionStatus).mode));
+		permissionsExtension(fake.pi as never);
+		const ctx = createFakeCtx({
+			cwd: dir,
+			modelRegistry: { getAvailable: () => [{ provider: "anthropic", id: "claude-haiku" }] },
+			sessionManager: { getSessionId: () => "s", getSessionDir: () => join(dir, "session"), getBranch: () => [...branch, ...fake.branch] },
+		});
+		await fake.fire("session_start", { reason }, ctx);
+		return { fake, ctx, modes, mode: () => modes.at(-1) };
+	}
+
+	it("resumes in the mode the branch last recorded, and records every switch", async () => {
+		const first = await start([]);
+		first.fake.events.emit(MODE_CHANNEL, { mode: "acceptEdits" });
+		const resumed = await start(first.fake.branch);
+		expect(resumed.mode()).toBe("acceptEdits");
+	});
+
+	it("keeps the mode across /clear, recorded on the new branch, but never a bypass", async () => {
+		const first = await start([]);
+		first.fake.events.emit(MODE_CHANNEL, { mode: "acceptEdits" });
+		const cleared = await start([], {}, "new");
+		expect(cleared.mode()).toBe("acceptEdits");
+		expect(cleared.fake.branch.at(-1)?.data).toMatchObject({ key: "permission-mode", value: "acceptEdits" });
+		// A fresh process does not inherit it: only /clear and /new in the same process carry it.
+		expect((await start([])).mode()).not.toBe("acceptEdits");
+		process.env[MODE_ENV] = "bypassPermissions";
+		expect((await start([], {}, "new")).mode()).not.toBe("bypassPermissions");
+	});
+
+	it("never restores a stored bypassPermissions: it needs its flag again", async () => {
+		const resumed = await start([stateEntry("permission-mode", "bypassPermissions")]);
+		expect(resumed.mode()).not.toBe("bypassPermissions");
+	});
+
+	it("lets a launch flag win over the branch, and tells the model, which a request told the branch's mode", async () => {
+		const reminders: ReminderPayload[] = [];
+		// `pi --continue --permission-mode default`: the process's first runtime starts with reason "startup".
+		const resumed = await start([stateEntry("permission-mode", "plan"), requestEntry], { "permission-mode": "default" }, "startup", reminders);
+		expect(resumed.mode()).toBe("default");
+		expect(reminders.find((r) => r.key === "permission-mode-change")?.text).toBe(permissionText().modeChanged({ mode: "default" }));
+	});
+
+	it("says nothing to a branch whose model was never told a mode, or that keeps it", async () => {
+		const reminders: ReminderPayload[] = [];
+		await start([stateEntry("permission-mode", "plan")], { "permission-mode": "default" }, "startup", reminders);
+		await start([stateEntry("permission-mode", "acceptEdits"), requestEntry], {}, "startup", reminders);
+		expect(reminders.find((r) => r.key === "permission-mode-change")).toBeUndefined();
+	});
+
+	it("keeps the branch's mode over the launch flags after the launch (/reload, /resume, /fork)", async () => {
+		for (const reason of ["reload", "resume", "fork"]) {
+			const run = await start([stateEntry("permission-mode", "acceptEdits"), requestEntry], { "permission-mode": "plan" }, reason);
+			expect(run.mode()).toBe("acceptEdits");
+		}
+	});
+
+	it("takes the selected branch's mode on /tree", async () => {
+		const run = await start([]);
+		run.fake.events.emit(MODE_CHANNEL, { mode: "plan" });
+		const other = [stateEntry("permission-mode", "acceptEdits")];
+		await run.fake.fire("session_tree", {}, { ...run.ctx, sessionManager: { ...(run.ctx.sessionManager as object), getBranch: () => other } });
+		expect(run.mode()).toBe("acceptEdits");
+	});
+});
+
+describe("ultracode follows the branch (H3)", () => {
+	/** The told fact of the standing block's first delivery: what a request that carried it records. */
+	const standingTold: ToldFact = { kind: "block", key: "sticky:ultracode-mode", hash: "standing-delivered" };
+	const isOffNotice = (text: string | undefined) => text === requireText("effort").ultracodeOff;
+
+	async function start(branch: unknown[], level = "xhigh") {
+		const fake = createFakePi();
+		let current = level;
+		fake.pi.getThinkingLevel = vi.fn(() => current);
+		fake.pi.setThinkingLevel = vi.fn((next: string) => {
+			current = next;
+		});
+		const reminders: ReminderPayload[] = [];
+		fake.events.on(REMINDER_CHANNEL, (data) => reminders.push(data as ReminderPayload));
+		effortExtension(fake.pi as never);
+		const ctx = createFakeCtx({ sessionManager: { getBranch: () => branch } });
+		await fake.fire("session_start", {}, ctx);
+		const standing = () => reminders.filter((r) => r.key === "ultracode-mode").at(-1);
+		/** The next request, its epoch having told `facts`: the off notices it carries, queued or rendered. */
+		const offNotices = (facts: readonly ToldFact[] = [standingTold]) => [
+			...reminders.filter((r) => !r.remove && (r.placement ?? "last-append") === "last-append" && isOffNotice(r.text)),
+			...renderRequest(fake.events, { facts }).filter((block) => isOffNotice(block.text)),
+		];
+		const effort = (args: string) => fake.commands.get("effort")!.handler(args, ctx);
+		return { fake, ctx, standing, offNotices, effort };
+	}
+
+	it("comes back on with its standing block when the branch recorded it on at pi's restored level", async () => {
+		const resumed = await start([stateEntry("ultracode", { on: true, level: "xhigh" })]);
+		expect(resumed.standing()).toMatchObject({ placement: "sticky-append" });
+	});
+
+	it("stays off, with no standing block, when the branch recorded it off or pi's level moved", async () => {
+		expect((await start([stateEntry("ultracode", { on: false })])).standing()).toMatchObject({ remove: true });
+		expect((await start([stateEntry("ultracode", { on: true, level: "xhigh" })], "high")).standing()).toMatchObject({ remove: true });
+		expect((await start([])).standing()).toMatchObject({ remove: true });
+	});
+
+	it("tells the model ultracode ended when the branch's model saw it on and a resume's level moved (R3-M21)", async () => {
+		expect((await start([stateEntry("ultracode", { on: true, level: "xhigh" })], "high")).offNotices()).toHaveLength(1);
+		expect((await start([stateEntry("ultracode", { on: false })])).offNotices([])).toEqual([]);
+		expect((await start([])).offNotices([])).toEqual([]);
+	});
+
+	it("withdraws the off notice when ultracode comes back on before the next request", async () => {
+		const run = await start([], "medium");
+		await run.effort("ultracode");
+		await run.effort("high");
+		await run.effort("ultracode");
+		expect(run.standing()).toMatchObject({ placement: "sticky-append" });
+		expect(run.offNotices()).toEqual([]);
+	});
+
+	it("says nothing about ultracode ending when the model never saw it on", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ultracode-workflows-"));
+		vi.stubEnv(envName("STATE_DIR"), dir);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ disableWorkflows: true }));
+		try {
+			const run = await start([], "medium");
+			await run.effort("ultracode");
+			await run.effort("high");
+			// Workflows off: the standing block was never sent, so no request told it.
+			expect(run.offNotices([])).toEqual([]);
+		} finally {
+			vi.unstubAllEnvs();
+			rmSync(dir, { recursive: true, force: true });
+		}
+		// Switched on and off again before any request carried the block.
+		const quick = await start([], "medium");
+		await quick.effort("ultracode");
+		await quick.effort("high");
+		expect(quick.offNotices([])).toEqual([]);
+	});
+
+	it("tells the off notice once: a request that carried it keeps a /reload from repeating it", async () => {
+		const branch = [stateEntry("ultracode", { on: true, level: "xhigh" })];
+		const first = await start(branch, "high");
+		const blocks = renderRequest(first.fake.events, { facts: [standingTold] });
+		const notice = blocks.find((block) => isOffNotice(block.text));
+		expect(notice?.facts?.length).toBeGreaterThan(0);
+		// The /reload: a new instance on the same branch, whose epoch now also holds what that request told.
+		const reloaded = await start(branch, "high");
+		expect(reloaded.offNotices([standingTold, ...(notice?.facts ?? [])])).toEqual([]);
+	});
+
+	it("tells a second off after ultracode came back on and the model saw it again", async () => {
+		const run = await start([], "medium");
+		await run.effort("ultracode");
+		await run.effort("high");
+		const offTold = renderRequest(run.fake.events, { facts: [standingTold] }).flatMap((block) => (isOffNotice(block.text) ? (block.facts ?? []) : []));
+		expect(offTold.length).toBeGreaterThan(0);
+		await run.effort("ultracode");
+		// Back on: nothing to say, whatever the epoch told.
+		expect(renderRequest(run.fake.events, { facts: [standingTold, ...offTold] }).filter((block) => isOffNotice(block.text))).toEqual([]);
+		await run.effort("high");
+		// Off before the standing block went out again: the model last read "off".
+		expect(renderRequest(run.fake.events, { facts: [standingTold, ...offTold] }).filter((block) => isOffNotice(block.text))).toEqual([]);
+		// Off after a request carried the standing block again.
+		expect(renderRequest(run.fake.events, { facts: [standingTold, ...offTold, { ...standingTold, hash: "standing-again" }] }).filter((block) => isOffNotice(block.text))).toHaveLength(1);
+	});
+
+	it("leaves the standing block out while workflows are turned off (R3-M21)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "ultracode-workflows-"));
+		vi.stubEnv(envName("STATE_DIR"), dir);
+		writeFileSync(join(dir, "settings.json"), JSON.stringify({ disableWorkflows: true }));
+		try {
+			expect((await start([stateEntry("ultracode", { on: true, level: "xhigh" })])).standing()).toMatchObject({ remove: true });
+		} finally {
+			vi.unstubAllEnvs();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("puts the branch's level back at a /tree switch, where pi restores none, and keeps ultracode on (R3-M21)", async () => {
+		const { fake, ctx, standing, offNotices } = await start([], "medium");
+		const branch = [stateEntry("ultracode", { on: true, level: "xhigh" })];
+		await fake.fire("session_tree", {}, createFakeCtx({ ...ctx, sessionManager: { getBranch: () => branch } }));
+		expect(standing()).toMatchObject({ placement: "sticky-append" });
+		expect(fake.pi.setThinkingLevel).toHaveBeenCalledWith("xhigh");
+		expect(offNotices()).toEqual([]);
+	});
+});
+

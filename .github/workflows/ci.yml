@@ -1,0 +1,33 @@
+# Typecheck, this product's tests, the base's tests on its fixture profile, and the rule that only a
+# sync writes the files the base owns.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run profile/test
+      - run: scripts/test-base.sh
+
+  # The base's repository must be reachable here: BASE_SOURCE overrides the
+  # source .base-sync.json records, which may be a path on a developer's machine.
+  base-unchanged:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node scripts/sync-base.mjs --check ${{ vars.BASE_SOURCE }}

@@ -1,0 +1,43 @@
+{
+	"name": "@wso2/pipit",
+	"version": "0.1.0",
+	"publishConfig": {
+		"access": "public"
+	},
+	"description": "Pipit (code name): the terminal coding agent for WSO2 Integrator. Ships its own pinned pi harness and keeps its state in ~/.pipit.",
+	"keywords": [
+		"wso2",
+		"ballerina",
+		"integration",
+		"coding-agent",
+		"cli",
+		"agent"
+	],
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/wso2/pipit.git",
+		"directory": "app"
+	},
+	"homepage": "https://github.com/wso2/pipit#readme",
+	"bugs": {
+		"url": "https://github.com/wso2/pipit/issues"
+	},
+	"type": "module",
+	"bin": {
+		"pipit": "bin.mjs"
+	},
+	"productExtension": "@wso2/pipit-extension",
+	"files": [
+		"bin.mjs",
+		"README.md",
+		"LICENSE"
+	],
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "1.5.0",
+		"@wso2/pipit-extension": "0.1.0"
+	}
+}

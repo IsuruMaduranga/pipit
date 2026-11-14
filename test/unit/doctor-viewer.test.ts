@@ -1,0 +1,63 @@
+import { describe, expect, it } from "vitest";
+import { applyDoctorKey, decodeDoctorKey, type DoctorViewerState, renderDoctorViewer, VIEWER_CHROME_ROWS, visibleBodyRows } from "../../extensions/commands/doctor/viewer.ts";
+
+const paint = (_c: string, t: string) => t;
+const lines = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`);
+
+describe("doctor viewer", () => {
+	it("decodes arrows, paging, home/end, f and close keys", () => {
+		expect(decodeDoctorKey("\x1b[B")).toEqual({ kind: "down" });
+		expect(decodeDoctorKey("\x1b[5~")).toEqual({ kind: "pageUp" });
+		expect(decodeDoctorKey(" ")).toEqual({ kind: "pageDown" });
+		expect(decodeDoctorKey("b")).toEqual({ kind: "pageUp" });
+		expect(decodeDoctorKey("G")).toEqual({ kind: "end" });
+		expect(decodeDoctorKey("f")).toEqual({ kind: "fix" });
+		expect(decodeDoctorKey("\x1b")).toEqual({ kind: "close" });
+		expect(decodeDoctorKey("\r")).toEqual({ kind: "close" });
+		expect(decodeDoctorKey("z")).toBeUndefined();
+	});
+
+	it("scrolls within bounds and pages by the visible height", () => {
+		const state = { offset: 0 };
+		applyDoctorKey(state, { kind: "up" }, 30, 10);
+		expect(state.offset).toBe(0);
+		applyDoctorKey(state, { kind: "pageDown" }, 30, 10);
+		expect(state.offset).toBe(9);
+		applyDoctorKey(state, { kind: "end" }, 30, 10);
+		expect(state.offset).toBe(20);
+		applyDoctorKey(state, { kind: "down" }, 30, 10);
+		expect(state.offset).toBe(20);
+		expect(applyDoctorKey(state, { kind: "fix" }, 30, 10)).toEqual({ kind: "fix" });
+		expect(applyDoctorKey(state, { kind: "close" }, 30, 10)).toEqual({ kind: "close" });
+	});
+
+	it("renders exactly `height` rows with the position and key hints", () => {
+		const state: DoctorViewerState = { offset: 5 };
+		const out = renderDoctorViewer({ lines, state, width: 200, height: 13, canFix: true }, paint);
+		expect(out).toHaveLength(13);
+		expect(visibleBodyRows(13)).toBe(13 - VIEWER_CHROME_ROWS);
+		expect(state.visibleRows).toBe(10);
+		expect(out[1]).toBe("line 6");
+		expect(out.at(-1)).toContain("6-15 of 30");
+		expect(out.at(-1)).toContain("f run the checkup");
+		expect(out.at(-1)).toContain("esc close");
+		// At 60 columns the hints wrap instead of cutting "esc close"; the body gives up the rows.
+		const narrowState: DoctorViewerState = { offset: 5 };
+		const narrow = renderDoctorViewer({ lines, state: narrowState, width: 60, height: 13, canFix: true }, paint);
+		expect(narrow).toHaveLength(13);
+		expect(narrow.every((line) => line.length <= 60)).toBe(true);
+		const footer = narrow.slice(-3).join(" ");
+		expect(footer).toContain("f run the checkup");
+		expect(footer).toContain("esc close");
+		expect(narrowState.visibleRows).toBeLessThan(10);
+		const noFix = renderDoctorViewer({ lines, state: { offset: 0 }, width: 60, height: 40, canFix: false }, paint);
+		expect(noFix.at(-1)).not.toContain("f run");
+		expect(noFix.at(-1)).not.toContain(" of ");
+	});
+
+	it("clamps a stale offset when the terminal grows", () => {
+		const state = { offset: 25 };
+		renderDoctorViewer({ lines, state, width: 60, height: 40, canFix: false }, paint);
+		expect(state.offset).toBe(0);
+	});
+});

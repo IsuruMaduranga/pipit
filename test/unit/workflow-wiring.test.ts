@@ -1,0 +1,194 @@
+/**
+ * agents/workflow/index.ts wiring: the "ultracode" keyword arms a turn with a one-shot
+ * reminder, except while `/effort ultracode` already has the standing block on
+ * (STEERING-REVIEW-2026-09-05 L3: two instructions for one fact, the weaker one
+ * on top).
+ */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ULTRACODE_MODE_CHANNEL } from "../../extensions/lib/ui/effort-slider.ts";
+import { REMINDER_CHANNEL } from "../../extensions/lib/request/reminders.ts";
+import { requireText } from "../../extensions/lib/profile/profile.ts";
+import workflowExtension from "../../extensions/agents/workflow/index.ts";
+import { createFakeCtx, createFakePi, type FakePi } from "./helpers/fake-pi.ts";
+import { notificationWords } from "../../extensions/lib/notify/notification-words.ts";
+import { workflowResultText } from "../../extensions/agents/workflow/text.ts";
+
+describe("workflow wiring: the ultracode keyword", () => {
+	let fake: FakePi;
+	const reminders: Array<{ text?: string; placement?: string }> = [];
+
+	beforeEach(() => {
+		fake = createFakePi();
+		reminders.length = 0;
+		fake.events.on(REMINDER_CHANNEL, (data) => reminders.push(data as never));
+		workflowExtension(fake.pi as never);
+	});
+
+	it("arms the turn with a next-turn one-shot when the keyword is in the prompt", async () => {
+		await fake.fire("input", { text: "ultracode: audit every extension", source: "interactive" });
+		expect(reminders).toHaveLength(1);
+		expect(reminders[0].placement).toBeUndefined();
+		expect(reminders[0].text).toBe(requireText("workflow").ultracodeReminder);
+
+		reminders.length = 0;
+		await fake.fire("input", { text: "no keyword here", source: "interactive" });
+		expect(reminders).toHaveLength(0);
+	});
+
+	it("skips the one-shot while ultracode mode is on, and resumes when it is switched off", async () => {
+		fake.events.emit(ULTRACODE_MODE_CHANNEL, { active: true });
+		await fake.fire("input", { text: "ultracode: audit every extension", source: "interactive" });
+		expect(reminders).toHaveLength(0);
+
+		fake.events.emit(ULTRACODE_MODE_CHANNEL, { active: false });
+		await fake.fire("input", { text: "ultracode: audit every extension", source: "interactive" });
+		expect(reminders).toHaveLength(1);
+	});
+
+	const delivered = (text: string) => fake.fire("message_start", { message: { role: "user", content: [{ type: "text", text }] } });
+
+	it.each(["steer", "followUp"] as const)("holds the one-shot for a message queued mid-turn (%s) until pi delivers it", async (behavior) => {
+		await fake.fire("input", { text: "ultracode: audit it", source: "interactive", streamingBehavior: behavior });
+		// Emitted now, the next tool result would take it: before the message.
+		expect(reminders).toHaveLength(0);
+		await delivered("an earlier queued message");
+		expect(reminders).toHaveLength(0);
+		await delivered("ultracode: audit it");
+		expect(reminders).toEqual([{ text: requireText("workflow").ultracodeReminder, placement: "last-append" }]);
+		await delivered("ultracode: audit it");
+		expect(reminders).toHaveLength(1);
+	});
+
+	it("drops a held one-shot when the turn settles without delivering its message", async () => {
+		await fake.fire("input", { text: "/tpl ultracode", source: "interactive", streamingBehavior: "steer" });
+		await fake.fire("agent_settled", {});
+		await delivered("/tpl ultracode");
+		expect(reminders).toHaveLength(0);
+	});
+});
+
+describe("workflow RPC commands", () => {
+	it("lists workflows and explains the unavailable viewer instead of silently dismissing it", async () => {
+		const fake = createFakePi();
+		workflowExtension(fake.pi as never);
+		const ctx = createFakeCtx({ mode: "rpc", hasUI: true });
+		await fake.commands.get("workflows")!.handler("", ctx);
+		const notices = (ctx._notified as Array<{ message: string }>).map((n) => n.message).join("\n");
+		expect(notices).toContain("requires TUI mode");
+		expect(notices).toContain("Usage: /workflows");
+		expect((ctx.ui as { custom: unknown }).custom).not.toHaveBeenCalled();
+	});
+});
+
+describe("workflow wiring: one-shot modes (LIFECYCLE-REVIEW-2026-09-06 M1)", () => {
+	let sessionDir: string;
+	let agentDir: string;
+	beforeEach(() => {
+		sessionDir = mkdtempSync(join(tmpdir(), "wf-oneshot-session-"));
+		agentDir = mkdtempSync(join(tmpdir(), "wf-oneshot-agent-"));
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(sessionDir, { recursive: true, force: true });
+		rmSync(agentDir, { recursive: true, force: true });
+	});
+
+	const ctxFor = (mode: string) =>
+		createFakeCtx({
+			mode,
+			cwd: process.cwd(),
+			sessionManager: { getSessionId: () => "s1", getSessionFile: () => undefined, getBranch: () => [], getSessionDir: () => sessionDir },
+		});
+	// No agent() call: completes without a model, so the run's shape alone is under test.
+	const script = "export const meta = { name: 'one-shot-probe', description: 'returns a value' }\nreturn { answer: 42 }";
+
+	// Battery round 7: every Qwen 3.8 model sent `args` as a JSON-encoded string
+	// despite the description, and `pipeline(args, …)` threw.
+	it.each([
+		['["a.py","b.py"]', "array:2"],
+		['{"files":["a.py"]}', "files:1"],
+		["plain text", "string:plain text"],
+	])("decodes a JSON-encoded array or object passed as args (%s)", async (args, expected) => {
+		const fake = createFakePi();
+		workflowExtension(fake.pi as never);
+		const probe = "export const meta = { name: 'args-probe', description: 'reports args' }\nreturn Array.isArray(args) ? `array:${args.length}` : typeof args === 'string' ? `string:${args}` : `files:${args.files.length}`";
+		const tool = fake.tools.get("workflow")! as unknown as { prepareArguments: (a: unknown) => unknown; execute: (...a: unknown[]) => Promise<unknown> };
+		const result = (await tool.execute("c1", tool.prepareArguments({ script: probe, args }), undefined, undefined, ctxFor("json"))) as { content: Array<{ text: string }> };
+		expect(result.content[0].text).toContain(expected);
+	});
+
+	it("in print/json mode a workflow runs to completion inside the tool call and reports inline", async () => {
+		const fake = createFakePi();
+		workflowExtension(fake.pi as never);
+		const result = (await fake.tools.get("workflow")!.execute("c1", { script }, undefined, undefined, ctxFor("json"))) as {
+			content: Array<{ text: string }>;
+			details: { background?: boolean; runId: string; status?: string; scriptPath: string };
+			isError?: boolean;
+		};
+		expect(result.details.background).toBeUndefined();
+		expect(result.details.status).toBe("completed");
+		expect(result.isError).toBe(false);
+		// The run's report with the one-shot note, and the persisted script's path the
+		// tool promises in every result, for a scriptPath re-run.
+		const report = workflowResultText.report({
+			name: "one-shot-probe",
+			runId: result.details.runId,
+			status: "completed",
+			stats: { agents: 0, outputTokens: 0, cost: 0 },
+			seconds: 0,
+			result: JSON.stringify({ answer: 42 }, null, 2),
+			progress: [],
+			keptWorktrees: [],
+		});
+		expect(result.content[0].text).toBe(
+			workflowResultText.ranToEnd({ note: notificationWords().oneShotNote("workflow"), report, scriptPath: result.details.scriptPath }),
+		);
+		// Nothing left to deliver later: no follow-up message is ever queued.
+		await new Promise((r) => setTimeout(r, 50));
+		expect(fake.sentMessages).toHaveLength(0);
+		expect(fake.sentUserMessages).toHaveLength(0);
+	});
+
+	// SUBAGENTS-WORKFLOWS-REVIEW-2026-09-26 H4: a resume reuses the run id, and a
+	// delivered-id set swallowed the resumed run's notification.
+	it("delivers the result of a background run resumed in the same session", async () => {
+		const fake = createFakePi();
+		workflowExtension(fake.pi as never);
+		const ctx = ctxFor("tui");
+		const workflow = fake.tools.get("workflow")!;
+		const resumable = "export const meta = { name: 'resume-probe', description: 'echoes args' }\nreturn args";
+		// The notifier sends a steer while the parent is busy, a user message when it is idle.
+		const delivered = () => [...fake.sentMessages.map((m) => JSON.stringify(m.message.content)), ...fake.sentUserMessages.map((m) => JSON.stringify(m.content))];
+		const first = (await workflow.execute("c1", { script: resumable, args: "FIRST" }, undefined, undefined, ctx)) as { details: { runId: string } };
+		await vi.waitFor(() => expect(delivered()).toHaveLength(1), { timeout: 5_000 });
+		const second = (await workflow.execute("c2", { resumeFromRunId: first.details.runId, args: "SECOND" }, undefined, undefined, ctx)) as {
+			content: Array<{ text: string }>;
+			details: { scriptPath: string };
+		};
+		expect(second.content[0].text).toBe(
+			workflowResultText.started({ name: "resume-probe", resumed: true, runId: first.details.runId, scriptPath: second.details.scriptPath }),
+		);
+		await vi.waitFor(() => expect(delivered()).toHaveLength(2), { timeout: 5_000 });
+		expect(delivered()[1]).toContain("SECOND");
+		expect(delivered()[1]).toContain("c2");
+	}, 15_000);
+
+	it.each(["tui", "rpc"])("in %s the same call still goes to the background", async (mode) => {
+		const fake = createFakePi();
+		workflowExtension(fake.pi as never);
+		const result = (await fake.tools.get("workflow")!.execute("c1", { script }, undefined, undefined, ctxFor(mode))) as {
+			content: Array<{ text: string }>;
+			details: { background?: boolean; runId: string; scriptPath: string };
+		};
+		expect(result.details.background).toBe(true);
+		expect(result.content[0].text).toBe(
+			workflowResultText.started({ name: "one-shot-probe", resumed: false, runId: result.details.runId, scriptPath: result.details.scriptPath }),
+		);
+		// Let the run finish so nothing leaks into the next test.
+		await new Promise((r) => setTimeout(r, 200));
+	});
+});
