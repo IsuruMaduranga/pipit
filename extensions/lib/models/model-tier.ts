@@ -14,7 +14,7 @@
  * `extensions/request/system-prompt` picks the prompt text from the tier;
  * `extensions/tools/search-tools` activates grep/find/ls only for `tiny`, unless
  * the profile turns those tools off (`searchToolsEnabled`). Frontier is a
- * version-gated first-party allowlist (Claude Code's own rule); below it the
+ * version-gated first-party allowlist; below it the
  * tier comes from the public catalogs (`model-catalog.ts`: release date, price
  * and size against the same vendor's current models), with no model names,
  * dollar floors or benchmark scores in the code. Rationale + rejected
@@ -42,6 +42,7 @@ import {
 	supportsImageInput,
 } from "./model-policy.ts";
 import { productSettingsPath } from "../profile/product-settings.ts";
+import { isPlainObject } from "../core/plain-object.ts";
 
 export type PromptTier = "frontier" | "workhorse" | "cheap" | "tiny";
 
@@ -228,8 +229,8 @@ export function modelTierOverrides(): Record<string, PromptTier> {
 	}
 	const raw = mtimeMs < 0 ? undefined : readJsonFile<{ modelTiers?: unknown }>(path)?.modelTiers;
 	const tiers: Record<string, PromptTier> = {};
-	if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-		for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+	if (isPlainObject(raw)) {
+		for (const [key, value] of Object.entries(raw)) {
 			if (isPromptTier(value)) tiers[key] = value;
 		}
 	}
