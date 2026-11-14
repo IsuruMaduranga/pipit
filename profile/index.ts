@@ -15,6 +15,7 @@
  */
 
 import type { Profile } from "../extensions/sdk/profile.ts";
+import { BALLERINA_SERVER, ballerinaLanguageServer } from "./extensions/ballerina/bi-language-server.ts";
 import { askUserText } from "./text/ask-user/index.ts";
 import { classifier } from "./text/auto-mode/classifier.ts";
 import { autoModeSetup } from "./text/auto-mode/setup.ts";
@@ -75,9 +76,10 @@ export const profile: Profile = {
 			version: {},
 		},
 	},
-	// The Ballerina language server of the installed distribution: diagnostics after each edit of a .bal file.
+	// Diagnostics after each edit of a .bal file, and the diagram models /visualize draws: the BI designer's
+	// server when its jar is downloaded and fits the distribution, the distribution's own server otherwise.
 	languageServers: {
-		ballerina: { command: "bal", args: ["start-language-server"], extensions: { ".bal": "ballerina" }, rootMarkers: ["Ballerina.toml"], startupTimeoutMs: 60_000 },
+		[BALLERINA_SERVER]: ballerinaLanguageServer(),
 	},
 	text: ({ live }) => ({
 		systemPrompt: systemPromptText(live),
