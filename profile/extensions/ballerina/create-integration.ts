@@ -16,6 +16,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve } from "node:path";
+import type { LspFileChange } from "../../../extensions/sdk/extension.ts";
 import { findProject, MANIFEST } from "./project.ts";
 
 /** The package that marks an integration as a library; `lib.bal` imports it. */
@@ -176,6 +177,20 @@ export interface Created {
 	library: boolean;
 	/** Every file written or changed, absolute. */
 	files: string[];
+}
+
+/**
+ * The files of a creation the language server reads, as the SDK's report
+ * takes them: the new `.bal` files and package manifest as created, and the
+ * project's manifest as created or, when it already existed and gained the
+ * integration, changed. The editor settings and `.gitignore` are no server's
+ * business.
+ */
+export function createdFileChanges(created: Created): LspFileChange[] {
+	const rootManifest = join(created.projectRoot, MANIFEST);
+	return created.files
+		.filter((path) => path.endsWith(".bal") || basename(path) === MANIFEST)
+		.map((path) => ({ path, type: path === rootManifest && !created.projectCreated ? ("changed" as const) : ("created" as const) }));
 }
 
 /** A refusal: what stands in the way, and the fix. */

@@ -9,14 +9,19 @@
  * (a child's turns included: the parent waits inside one turn while its
  * subagent runs) and on every `config_status` call, or a value the user has
  * just added would reach the model unredacted.
+ *
+ * `create_integration` reports the files it writes to the language server
+ * (the SDK's `lspFilesChanged`), since they arrive outside the base's `edit`
+ * and `write` tools. A child session runs no server, so its report is a no-op.
  */
 
 import { userInfo } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { MIN_SECRET_LENGTH, persistIfLarge, sessionResultsDir, setSecretValues, toolRenderers } from "../../../extensions/sdk/extension.ts";
+import { lspFilesChanged, MIN_SECRET_LENGTH, persistIfLarge, sessionResultsDir, setSecretValues, toolRenderers } from "../../../extensions/sdk/extension.ts";
+import { BALLERINA_SERVER } from "./bi-language-server.ts";
 import { distributionOf } from "./environment.ts";
-import { CreateError, createIntegration, formatCreated } from "./create-integration.ts";
+import { CreateError, createdFileChanges, createIntegration, formatCreated } from "./create-integration.ts";
 import { configReport, formatReport, projectSecrets, type ReportCounts, reportCounts } from "./config-status.ts";
 
 export const CONFIG_STATUS_TOOL = "config_status";
@@ -136,6 +141,8 @@ export function registerBallerinaSession(pi: ExtensionAPI): void {
 					distribution: await installedDistribution(pi),
 					username: loginName(),
 				});
+				// The language server learns of the new files now, not at the first edit; a failed report changes nothing on disk.
+				await lspFilesChanged(pi.events, { server: BALLERINA_SERVER, changes: createdFileChanges(created) }).catch(() => {});
 				return { content: [{ type: "text" as const, text: formatCreated(created) }], details: { files: created.files.length } };
 			} catch (error) {
 				if (!(error instanceof CreateError)) throw error;

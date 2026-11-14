@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { APP_ONLY_FILES, CreateError, createIntegration, formatCreated, orgName, packageManifest, packageName, SOURCE_FILES, withPackage, workspaceManifest } from "../extensions/ballerina/create-integration.ts";
+import { APP_ONLY_FILES, CreateError, createdFileChanges, createIntegration, formatCreated, orgName, packageManifest, packageName, SOURCE_FILES, withPackage, workspaceManifest } from "../extensions/ballerina/create-integration.ts";
 import { findProject } from "../extensions/ballerina/project.ts";
 
 const made: string[] = [];
@@ -170,5 +170,26 @@ describe.skipIf(!existsSync(BI_CREATOR))("the layout is the BI designer's", () =
 		expect(workspace && fill(workspace, { "projectRequest.workspaceName": "Shop", "sanitizeName(projectRequest.packageName)": "api" })).toBe(workspaceManifest("Shop", "api"));
 		const files = [...source.slice(source.indexOf("export async function createBIProjectPure")).matchAll(/path\.join\(projectRoot, '([a-z_]+\.bal)'\)/g)].map((found) => found[1]);
 		expect(files.sort()).toEqual([...SOURCE_FILES, ...APP_ONLY_FILES, "lib.bal"].sort());
+	});
+});
+
+describe("what the language server is told", () => {
+	it("reports the new sources and manifests as created, and leaves the editor files out", () => {
+		const cwd = temp();
+		const created = create(cwd, "order_sync");
+		const changes = createdFileChanges(created);
+		expect(changes.every((change) => change.type === "created")).toBe(true);
+		expect(changes.map((change) => change.path).sort()).toEqual(
+			[join(cwd, "Ballerina.toml"), join(cwd, "order_sync", "Ballerina.toml"), ...[...SOURCE_FILES, ...APP_ONLY_FILES].map((file) => join(cwd, "order_sync", file))].sort(),
+		);
+	});
+
+	it("reports an existing project's manifest as changed", () => {
+		const cwd = temp();
+		create(cwd, "first");
+		const second = create(cwd, "second");
+		const changes = createdFileChanges(second);
+		expect(changes.find((change) => change.path === join(cwd, "Ballerina.toml"))).toEqual({ path: join(cwd, "Ballerina.toml"), type: "changed" });
+		expect(changes.filter((change) => change.type === "changed")).toHaveLength(1);
 	});
 });

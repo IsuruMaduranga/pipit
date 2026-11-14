@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { redactSecretValues, setSecretValues } from "../../extensions/lib/profile/secrets.ts";
 import { SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../extensions/sdk/extension.ts";
+import { LSP_FILES_CHANGED_CHANNEL, type LspFilesChangedEvent } from "../../extensions/tools/lsp/request-channel.ts";
 import { createFakeCtx, createFakePi } from "../../test/unit/helpers/fake-pi.ts";
 import ballerinaChild from "../extensions/ballerina/child.ts";
 import ballerina, { BALLERINA_SECTION_ID } from "../extensions/ballerina/index.ts";
@@ -122,6 +123,37 @@ describe("the Ballerina extension", () => {
 			expect(again.isError).toBe(true);
 			expect(again.content[0].text).toContain("nothing is overwritten");
 		}
+	});
+
+	it("reports the files create_integration writes to the language server, before the tool returns", async () => {
+		const { fake } = load(ballerina);
+		const reports: LspFilesChangedEvent[] = [];
+		let applied = false;
+		fake.events.on(LSP_FILES_CHANGED_CHANNEL, (data) => {
+			const report = data as LspFilesChangedEvent;
+			reports.push(report);
+			report.reply(new Promise<void>((resolve) => setTimeout(() => resolve(void (applied = true)), 10)));
+		});
+		const cwd = project({});
+		const result = (await fake.tools.get("create_integration")?.execute("toolu_create", { name: "billing" }, undefined, undefined, createFakeCtx({ cwd }))) as { isError?: boolean };
+		expect(result.isError).toBeUndefined();
+		expect(applied).toBe(true);
+		expect(reports).toHaveLength(1);
+		expect(reports[0].server).toBe("ballerina");
+		expect(reports[0].changes).toContainEqual({ path: join(cwd, "billing", "main.bal"), type: "created" });
+		expect(reports[0].changes.some((change) => change.path.endsWith("settings.json"))).toBe(false);
+	});
+
+	it("still creates the integration when the report is rejected", async () => {
+		const { fake } = load(ballerinaChild);
+		// The SDK rejects a report only for a server the profile does not declare.
+		fake.events.on(LSP_FILES_CHANGED_CHANNEL, (data) => {
+			(data as LspFilesChangedEvent).reply(Promise.reject(new Error("The profile declares no language server named \"ballerina\".")));
+		});
+		const cwd = project({});
+		const result = (await fake.tools.get("create_integration")?.execute("toolu_create", { name: "billing" }, undefined, undefined, createFakeCtx({ cwd }))) as { isError?: boolean };
+		expect(result.isError).toBeUndefined();
+		expect(readFileSync(join(cwd, "billing", "main.bal"), "utf8")).toBe("\n");
 	});
 
 	it("marks a report with a problem as an error, keeping what it could read", async () => {
