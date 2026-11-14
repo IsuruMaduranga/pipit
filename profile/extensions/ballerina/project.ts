@@ -26,6 +26,11 @@ export const WALK_MAX_DIRS = 1000;
 /** Never descended into: build output, dependencies, version control, and any dot folder. */
 const SKIPPED_DIRS = new Set(["target", "node_modules", "build"]);
 
+/** Whether a folder of this name is left out of every walk of a project: build output, dependencies, and any dot folder. */
+export function isSkippedDir(name: string): boolean {
+	return name.startsWith(".") || SKIPPED_DIRS.has(name);
+}
+
 export interface BalFile {
 	/** Absolute path. */
 	path: string;
@@ -171,7 +176,7 @@ export function walk(root: string, names: readonly string[]): Walk {
 		}
 		for (const entry of entries) {
 			if (entry.isDirectory()) {
-				if (entry.name.startsWith(".") || SKIPPED_DIRS.has(entry.name)) continue;
+				if (isSkippedDir(entry.name)) continue;
 				if (depth < WALK_MAX_DEPTH) queue.push([join(dir, entry.name), depth + 1]);
 				else truncated = true;
 			} else if (entry.isFile()) {

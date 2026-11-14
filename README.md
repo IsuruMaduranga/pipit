@@ -32,6 +32,47 @@ node app/bin.mjs
 The link makes this tree the extension package the app loads. The app keeps
 its state in `~/.pipit`, so sign in once with `/login`.
 
+## See an integration's diagrams
+
+In an interactive session started inside a BI project, run `/visualize`.
+Pipit opens a browser page that draws the integration the way the BI designer
+in VS Code does: the overview of services, listeners, connections and the
+automation, and the flow of each resource, the automation and each function.
+The page is view only and updates within a second after a `.bal` file or
+`Ballerina.toml` changes, including files moved, renamed or deleted and new
+integrations in the project. Running `/visualize` again opens the same page.
+The command returns at once, so you can keep working while it starts.
+
+The page needs the BI designer's language server. The first `/visualize` on a
+machine downloads it (about 73 MB) from the `v6.0.1` release of
+`ballerina-platform/ballerina-vscode` into `~/.pipit/language-server/`, and
+checks its size and SHA-256. It runs on Ballerina 2201.14 (Update 14) with
+the distribution's own Java 25. Without it, the session uses
+`bal start-language-server`, which gives diagnostics but no diagrams.
+
+- If the session had already started the other language server, Pipit offers
+  to reload the session; the conversation is kept. Run `/visualize` again
+  after the reload.
+- The page is served on `127.0.0.1` at an address with a random token, and
+  stops when the session ends.
+- On Windows, `/visualize` explains that it is not available, and the session
+  keeps the stock language server.
+- With `-p` or `--mode`, `/visualize` prints why it needs the interactive
+  terminal and starts nothing.
+
+### Rebuild the diagram view's page
+
+The page is a bundle committed under
+`profile/extensions/ballerina/visualize/bundle/`. It is built from a
+`ballerina-vscode` checkout whose libraries are already built:
+
+```bash
+node profile/extensions/ballerina/visualize/build-bundle.mjs ~/wso2/integrator/ballerina-vscode
+```
+
+The script reads the checkout and changes nothing in it. It records the
+commits it built from in `bundle/build.json`.
+
 ## Check a change
 
 ```bash

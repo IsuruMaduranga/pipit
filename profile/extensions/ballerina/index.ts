@@ -1,21 +1,50 @@
 /**
  * The Ballerina extension's main-session entry: the tools and secret
  * redaction every session gets (session.ts), the `# Ballerina` section of
- * the system prompt (prompt.ts), and one notice when Ballerina is missing or
+ * the system prompt (prompt.ts), one notice when Ballerina is missing or
  * out of date on this machine (environment.ts), which points the model at
- * the `ballerina-setup` skill. A child session loads child.ts instead.
+ * the `ballerina-setup` skill, and the `/visualize` command
+ * (visualize/visualize.ts), which shows the integration's diagrams in a
+ * browser and adds nothing to the model's request. A child session loads
+ * child.ts instead.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { REMINDER_CHANNEL, type ReminderPayload, SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../../extensions/sdk/extension.ts";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { lspFilesChanged, lspRequest, REMINDER_CHANNEL, type ReminderPayload, SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../../extensions/sdk/extension.ts";
+import brand from "../../brand.json" with { type: "json" };
+import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "./bi-language-server.ts";
 import { probeBallerina, setupNotice } from "./environment.ts";
+import { ensureJar } from "./jar-download.ts";
 import { ballerinaSection } from "./prompt.ts";
 import { registerBallerinaSession } from "./session.ts";
+import { openBrowser } from "./visualize/browser.ts";
+import { type CommandUi, Visualizer } from "./visualize/visualize.ts";
 
 export const BALLERINA_SECTION_ID = "ballerina";
 export const SETUP_REMINDER_KEY = "ballerina-setup";
+export const VISUALIZE_COMMAND = "visualize";
 /** `bal` starts a JVM: slow on a cold machine, and never worth holding a session for. */
 const PROBE_TIMEOUT_MS = 30_000;
+const BUNDLE_DIR = fileURLToPath(new URL("./visualize/bundle", import.meta.url));
+const STATUS_KEY = "visualize";
+
+/** The command's notices, confirm and reload, in the terminal interface (the only place the command runs). */
+function commandUi(ctx: ExtensionCommandContext): CommandUi {
+	return {
+		notify: (text, level) => ctx.ui.notify(text, level),
+		setStatus: (text) => ctx.ui.setStatus(STATUS_KEY, text),
+		confirm: async (title, body) => (await ctx.ui.confirm(title, body)) === true,
+		reload: () => ctx.reload(),
+	};
+}
+
+/**
+ * Print and JSON modes bind no interface, so a notice would go nowhere and
+ * the page would end with the run: the command says so on stderr, which
+ * those modes show, and starts nothing.
+ */
+export const NO_INTERFACE_MESSAGE = "/visualize needs the interactive terminal: the page lives as long as the session. Start the product without -p or --mode, then run /visualize.";
 
 export default function ballerina(pi: ExtensionAPI) {
 	registerBallerinaSession(pi);
@@ -25,6 +54,7 @@ export default function ballerina(pi: ExtensionAPI) {
 	// at once, and the notice joins the next request after the answer is in.
 	// With Ballerina in place it says nothing, so the usual session pays nothing.
 	let live = false;
+	let visualizer: Visualizer | undefined;
 	pi.on("session_start", () => {
 		live = true;
 		void probeBallerina((command, args) => pi.exec(command, args, { timeout: PROBE_TIMEOUT_MS })).then((status) => {
@@ -32,7 +62,37 @@ export default function ballerina(pi: ExtensionAPI) {
 			if (live && text) pi.events.emit(REMINDER_CHANNEL, { key: SETUP_REMINDER_KEY, text, placement: "last-append" } satisfies ReminderPayload);
 		});
 	});
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", async () => {
 		live = false;
+		const running = visualizer;
+		visualizer = undefined;
+		await running?.stop();
+	});
+
+	const request = (file: string, method: string, params: unknown, timeoutMs: number) => lspRequest(pi.events, { server: BALLERINA_SERVER, file, method, params, timeoutMs });
+	pi.registerCommand(VISUALIZE_COMMAND, {
+		description: "Open the integration's diagrams in a browser: the overview and each flow, updated as the code changes",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				process.stderr.write(`${NO_INTERFACE_MESSAGE}\n`);
+				return;
+			}
+			visualizer ??= new Visualizer({
+				platform: process.platform,
+				cwd: ctx.cwd,
+				productName: brand.name,
+				bundleDir: BUNDLE_DIR,
+				ensureJar: (progress, signal) => ensureJar({ pin: BI_JAR, target: jarPath(), ...progress, signal }),
+				checkLauncher: async () => {
+					const result = await pi.exec("sh", [LAUNCHER_PATH, "--check", ...launcherArgs(jarPath())], { timeout: PROBE_TIMEOUT_MS });
+					return parseLauncherCheck(result.stdout);
+				},
+				request: (model) => request(model.routeFile, model.method, model.params, model.timeoutMs),
+				sync: (changes) => lspFilesChanged(pi.events, { server: BALLERINA_SERVER, changes }),
+				openBrowser: (url) => openBrowser(url),
+			});
+			// Returns at once: pi holds the user's input until a command handler returns, and the first start downloads 73 MB.
+			visualizer.open(commandUi(ctx));
+		},
 	});
 }

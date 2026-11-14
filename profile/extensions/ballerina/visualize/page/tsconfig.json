@@ -1,0 +1,29 @@
+// The diagram view's page runs in a browser and imports React and the BI
+// designer's diagram packages, which come from a ballerina-vscode checkout,
+// not from this repository; the repository's own tsconfig.json leaves .tsx
+// files out. This config typechecks the page against the checkout's types.
+// The paths name the default checkout beside this repository
+// (~/wso2/integrator/ballerina-vscode next to ~/wso2/bi-copilot), for the
+// editor; build-bundle.mjs runs tsc with the checkout it is given.
+{
+	"compilerOptions": {
+		"target": "ES2020",
+		"lib": ["ES2022", "DOM", "DOM.Iterable"],
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"jsx": "react-jsx",
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"isolatedModules": true,
+		"types": [],
+		"paths": {
+			"react": ["../../../../../../integrator/ballerina-vscode/packages/bi-diagram/node_modules/@types/react"],
+			"react/*": ["../../../../../../integrator/ballerina-vscode/packages/bi-diagram/node_modules/@types/react/*"],
+			"react-dom/*": ["../../../../../../integrator/ballerina-vscode/packages/bi-diagram/node_modules/@types/react-dom/*"],
+			"@wso2/bi-diagram": ["../../../../../../integrator/ballerina-vscode/packages/bi-diagram/lib/index.d.ts"],
+			"@wso2/component-diagram": ["../../../../../../integrator/ballerina-vscode/packages/component-diagram/lib/index.d.ts"]
+		}
+	},
+	"include": ["*.tsx"]
+}

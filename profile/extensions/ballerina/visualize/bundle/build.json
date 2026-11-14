@@ -1,0 +1,14 @@
+{
+	"checkout": {
+		"commit": "73b0985e34e036860b91514eaf591e27d1b3ba17",
+		"submodules/wso2-vscode-extensions": "e578f974a74fc06241feed3e2be2faa50359dde0",
+		"localChangesInDiagramPackages": []
+	},
+	"esbuild": "0.25.12",
+	"sidePanel": "stubbed (page/side-panel-stub.js)",
+	"gilmer": "left out (page/system-fonts.css)",
+	"fonts": [
+		"assets/codicon-7WVOR3UC.ttf",
+		"assets/wso2-vscode-DNILF5QQ.woff2"
+	]
+}
