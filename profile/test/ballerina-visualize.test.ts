@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeCtx, createFakePi } from "../../test/unit/helpers/fake-pi.ts";
+import { lspErrorDetail } from "../../extensions/sdk/extension.ts";
 import ballerinaChild from "../extensions/ballerina/child.ts";
 import ballerina, { VISUALIZE_COMMAND } from "../extensions/ballerina/index.ts";
 import type { LauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
@@ -57,6 +58,7 @@ function fakes(overrides: Partial<VisualizeEnv> = {}, uiOverrides: Partial<Comma
 			requests.push(request);
 			return {};
 		}),
+		errorDetail: lspErrorDetail,
 		sync: vi.fn(async () => {}),
 		openBrowser: vi.fn(async () => undefined),
 		...overrides,
@@ -72,6 +74,17 @@ function fakes(overrides: Partial<VisualizeEnv> = {}, uiOverrides: Partial<Comma
 	};
 	return { env, ui, requests };
 }
+
+/**
+ * A server's refusal as the SDK's client raises it (read by shape, so a plain
+ * Error with the class's name and fields stands in for it).
+ */
+function refusal(method: string, data?: unknown): Error {
+	return Object.assign(new Error("Internal error."), { name: "LspResponseError", method, code: -32603, data });
+}
+
+/** The stock server's answer to a method it does not know (findings 02, stock-server.md). */
+const unknownMethod = (method: string) => refusal(method, `java.lang.UnsupportedOperationException: The json request '${method}' is unknown.\n\tat org.eclipse.lsp4j…`);
 
 /** Start the view and wait for the start, which runs in the background, to finish. */
 const open = async (f: Fakes) => {
@@ -149,7 +162,7 @@ describe("/visualize", () => {
 	});
 
 	it("prints the address when no browser can open", async () => {
-		const f = fakes({ openBrowser: vi.fn(async () => "this is an SSH session") });
+		const f = fakes({ openBrowser: vi.fn(async () => "ssh" as const) });
 		const view = await open(f);
 		expect(f.ui.notices).toEqual([["warning", `Integration view: ${view.url} (open it in a browser; none was started because this is an SSH session)`]]);
 	});
@@ -193,13 +206,14 @@ describe("/visualize", () => {
 		const f = fakes(
 			{
 				request: vi.fn(async (request: ModelRequest) => {
-					if (request.method === "designModelService/projectInfo") throw new Error("Internal error.");
-					return { designModel: {} };
+					throw unknownMethod(request.method);
 				}),
 			},
 			{ confirm, reload },
 		);
 		const view = await open(f);
+		expect(f.requests).toEqual([]);
+		expect(f.env.request).toHaveBeenCalledTimes(1);
 		expect(confirm).toHaveBeenCalledWith("Restart the language server?", expect.stringContaining("Reloading the session restarts it"));
 		expect(reload).toHaveBeenCalledTimes(1);
 		expect(view.url).toBeUndefined();
@@ -208,12 +222,19 @@ describe("/visualize", () => {
 	it("tells the user how to restart when they decline the reload", async () => {
 		const f = fakes({
 			request: vi.fn(async (request: ModelRequest) => {
-				if (request.method === "designModelService/projectInfo") throw new Error("Internal error.");
-				return {};
+				throw unknownMethod(request.method);
 			}),
 		});
 		await open(f);
 		expect(f.ui.notices).toEqual([["warning", expect.stringContaining("Run /reload, or start a new session, then run /visualize again.")]]);
+	});
+
+	it("reports the jar's own refusal instead of offering a restart that would not help", async () => {
+		const confirm = vi.fn(async () => true);
+		const f = fakes({ request: vi.fn(async (request: ModelRequest) => Promise.reject(refusal(request.method, "java.lang.NullPointerException"))) }, { confirm });
+		await open(f);
+		expect(confirm).not.toHaveBeenCalled();
+		expect(f.ui.notices).toEqual([["error", "The Ballerina language server cannot answer: Internal error."]]);
 	});
 
 	it("reports a server that cannot answer at all, or too slowly", async () => {

@@ -12,16 +12,16 @@
  * `/fork` or `/reload` replaced it), nothing here calls the session again:
  * pi has invalidated it, and every call would throw.
  *
- * index.ts wires it to pi: the command, the SDK's `lspRequest` and
- * `lspFilesChanged`, the launcher check through `pi.exec`, and the
- * terminal's notices.
+ * index.ts wires it to pi: the command, the SDK's `lspRequest`,
+ * `lspErrorDetail`, `lspFilesChanged` and `openInBrowser`, the launcher check
+ * through `pi.exec`, and the terminal's notices.
  */
 
 import { basename, isAbsolute, relative } from "node:path";
-import type { LspFileChange } from "../../../../extensions/sdk/extension.ts";
+import type { LspErrorDetail, LspFileChange, NoBrowserReason } from "../../../../extensions/sdk/extension.ts";
 import { type LauncherCheck, launcherProblem } from "../bi-language-server.ts";
 import { findProject, MANIFEST, type Project } from "../project.ts";
-import { type ModelRequest, projectInfoRequest, type ViewPackage } from "./routes.ts";
+import { isUnknownMethod, type ModelRequest, projectInfoRequest, type ViewPackage } from "./routes.ts";
 import { startViewerServer, type ViewerServer, type ViewProject } from "./server.ts";
 import { type ProjectWatcher, watchProject } from "./watcher.ts";
 
@@ -37,10 +37,12 @@ export interface VisualizeEnv {
 	checkLauncher(): Promise<LauncherCheck>;
 	/** A request on the language server; rejects when no server can answer. */
 	request(request: ModelRequest): Promise<unknown>;
+	/** The server's code, message and data when `error` is its refusal of a request (the SDK's `lspErrorDetail`). */
+	errorDetail(error: unknown): LspErrorDetail | undefined;
 	/** Tell the language server about changed files; resolves once it has them (the SDK's `lspFilesChanged`). */
 	sync(changes: LspFileChange[]): Promise<void>;
-	/** Resolves with why no browser opened, or undefined. */
-	openBrowser(url: string): Promise<string | undefined>;
+	/** Resolves with why no browser opened, or undefined (the SDK's `openInBrowser`). */
+	openBrowser(url: string): Promise<NoBrowserReason | undefined>;
 }
 
 export interface JarProgress {
@@ -62,6 +64,13 @@ export const WINDOWS_MESSAGE =
 const NO_PROJECT_MESSAGE = "No Ballerina project here: start the session in an integration's folder or its project (a folder with a Ballerina.toml), then run /visualize.";
 
 const TIMED_OUT = /\btimed out\b/i;
+
+/** Why no browser opened, as the address notice ends. */
+const NO_BROWSER: Record<NoBrowserReason, string> = {
+	ssh: "this is an SSH session",
+	noDisplay: "there is no desktop display",
+	launchFailed: "the system's browser opener did not start",
+};
 
 /** The package the page opens first: the one the working directory is in, else the first. */
 export function initialPackage(packages: readonly ViewPackage[], cwd: string): ViewPackage | undefined {
@@ -223,23 +232,15 @@ export class Visualizer {
 		} catch (error) {
 			if (this.stopped) return false;
 			const message = (error as Error).message;
-			if (TIMED_OUT.test(message)) {
-				ui.notify(`The Ballerina language server did not answer: ${message}`, "error");
-				return false;
-			}
-			return this.offerRestart(ui, pkg, message);
+			if (isUnknownMethod(env.errorDetail(error))) return this.offerRestart(ui, message);
+			const verb = TIMED_OUT.test(message) ? "did not answer" : "cannot answer";
+			ui.notify(`The Ballerina language server ${verb}: ${message}`, "error");
+			return false;
 		}
 	}
 
-	/** The running server answers, but not as the BI designer's server: it started before the jar was in place. */
-	private async offerRestart(ui: CommandUi, pkg: ViewPackage, probeError: string): Promise<boolean> {
-		try {
-			await this.env.request({ ...projectInfoRequest(pkg), method: "designModelService/getDesignModel" });
-		} catch (error) {
-			ui.notify(`The Ballerina language server cannot answer: ${(error as Error).message}`, "error");
-			return false;
-		}
-		if (this.stopped) return false;
+	/** The running server does not know the BI designer's requests: it is the stock server, started before the jar was in place. */
+	private async offerRestart(ui: CommandUi, probeError: string): Promise<boolean> {
 		const why = "The Ballerina language server running in this session started before the BI designer's server was installed, so it cannot draw the diagrams.";
 		const yes = await ui.confirm("Restart the language server?", `${why} Reloading the session restarts it and keeps the conversation. Run /visualize again once the reload finishes.`);
 		if (this.stopped) return false;
@@ -269,7 +270,7 @@ export class Visualizer {
 	private async show(url: string, ui: CommandUi): Promise<void> {
 		if (this.stopped) return;
 		const failed = await this.env.openBrowser(url);
-		if (failed) ui.notify(`Integration view: ${url} (open it in a browser; none was started because ${failed})`, "warning");
+		if (failed) ui.notify(`Integration view: ${url} (open it in a browser; none was started because ${NO_BROWSER[failed]})`, "warning");
 		else ui.notify(`Integration view: ${url}`, "info");
 	}
 }

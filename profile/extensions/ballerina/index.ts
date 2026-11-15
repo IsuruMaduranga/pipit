@@ -11,14 +11,13 @@
 
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { lspFilesChanged, lspRequest, REMINDER_CHANNEL, type ReminderPayload, SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../../extensions/sdk/extension.ts";
+import { lspErrorDetail, lspFilesChanged, lspRequest, openInBrowser, REMINDER_CHANNEL, type ReminderPayload, SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../../extensions/sdk/extension.ts";
 import brand from "../../brand.json" with { type: "json" };
 import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "./bi-language-server.ts";
 import { probeBallerina, setupNotice } from "./environment.ts";
 import { ensureJar } from "./jar-download.ts";
 import { ballerinaSection } from "./prompt.ts";
 import { registerBallerinaSession } from "./session.ts";
-import { openBrowser } from "./visualize/browser.ts";
 import { type CommandUi, Visualizer } from "./visualize/visualize.ts";
 
 export const BALLERINA_SECTION_ID = "ballerina";
@@ -88,8 +87,9 @@ export default function ballerina(pi: ExtensionAPI) {
 					return parseLauncherCheck(result.stdout);
 				},
 				request: (model) => request(model.routeFile, model.method, model.params, model.timeoutMs),
+				errorDetail: lspErrorDetail,
 				sync: (changes) => lspFilesChanged(pi.events, { server: BALLERINA_SERVER, changes }),
-				openBrowser: (url) => openBrowser(url),
+				openBrowser: openInBrowser,
 			});
 			// Returns at once: pi holds the user's input until a command handler returns, and the first start downloads 73 MB.
 			visualizer.open(commandUi(ctx));
