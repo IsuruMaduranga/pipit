@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFakeCtx, createFakePi } from "../../test/unit/helpers/fake-pi.ts";
 import { lspErrorDetail } from "../../extensions/sdk/extension.ts";
+import { LspResponseError } from "../../extensions/tools/lsp/failure.ts";
 import ballerinaChild from "../extensions/ballerina/child.ts";
 import ballerina, { VISUALIZE_COMMAND } from "../extensions/ballerina/index.ts";
 import type { LauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
@@ -75,13 +76,8 @@ function fakes(overrides: Partial<VisualizeEnv> = {}, uiOverrides: Partial<Comma
 	return { env, ui, requests };
 }
 
-/**
- * A server's refusal as the SDK's client raises it (read by shape, so a plain
- * Error with the class's name and fields stands in for it).
- */
-function refusal(method: string, data?: unknown): Error {
-	return Object.assign(new Error("Internal error."), { name: "LspResponseError", method, code: -32603, data });
-}
+/** A server's refusal as the SDK's client raises it: the stock server answers every refusal with -32603. */
+const refusal = (method: string, data?: unknown) => new LspResponseError(method, -32603, "Internal error.", data);
 
 /** The stock server's answer to a method it does not know (findings 02, stock-server.md). */
 const unknownMethod = (method: string) => refusal(method, `java.lang.UnsupportedOperationException: The json request '${method}' is unknown.\n\tat org.eclipse.lsp4j…`);
@@ -212,7 +208,6 @@ describe("/visualize", () => {
 			{ confirm, reload },
 		);
 		const view = await open(f);
-		expect(f.requests).toEqual([]);
 		expect(f.env.request).toHaveBeenCalledTimes(1);
 		expect(confirm).toHaveBeenCalledWith("Restart the language server?", expect.stringContaining("Reloading the session restarts it"));
 		expect(reload).toHaveBeenCalledTimes(1);

@@ -58,12 +58,9 @@ export const LAUNCHER_PATH = fileURLToPath(new URL("./language-server.sh", impor
 /**
  * The product's state folder, by the brand's names: `<envPrefix>_STATE_DIR`,
  * else `~/<stateDir>`. The default profile's brand, so every profile of the
- * product shares one downloaded jar. The base has the same rule as
- * `sharedStateDir`. This module computes it itself because the profile's
- * language-server declaration needs the jar's path and the profile's door
- * (`sdk/profile.ts`) exports no state folder; the extension's door has
- * `productStateDir`, but that is the folder of the profile in force, and the
- * download and the launch must agree on one path.
+ * product shares one downloaded jar. It repeats the base's `sharedStateDir`,
+ * which neither SDK door exports (the extension's `productStateDir` follows
+ * the profile in force).
  */
 export function brandStateDir(env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
 	return env[`${brand.envPrefix}_STATE_DIR`] || join(home, brand.stateDir);
