@@ -18,6 +18,8 @@
  */
 
 import { brand, brandedId } from "../../lib/profile/brand.mjs";
+import { announcePrompt, desktopNotificationText } from "../../lib/notify/desktop.ts";
+import { ccToolName } from "../../lib/rules/hook-matcher.ts";
 import { featureEnabled } from "../../lib/profile/profile.ts";
 import { rulesetOwner } from "./auto-mode/classifier-prompt.ts";
 import { feature } from "../../lib/profile/feature.ts";
@@ -28,7 +30,7 @@ import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil
 import { hasReviewableWork, SUBAGENT_ACTIONS_CHANNEL, type SubagentActionsPayload } from "../../lib/rules/auto-mode-actions.ts";
 import { guideDocsDirs } from "../../lib/agents/guide-docs.ts";
 import { TURN_FAILED_CHANNEL, type TurnFailedEvent } from "../../lib/notify/interrupt.ts";
-import { handBackWarning, type HandBackVerdict } from "../../lib/notify/notifications.ts";
+import { handBackFlagBlock, handBackWarning, type HandBackVerdict } from "../../lib/notify/notifications.ts";
 import { MODEL_UNUSABLE_CHANNEL, type ModelUnusableEvent } from "../../lib/models/model-unusable.ts";
 
 import { classifierCacheKey, classifierChain, classify, createClassifierState, releaseClassifierResources } from "./auto-mode/classifier.ts";
@@ -608,7 +610,8 @@ function permissionsExtension(pi: ExtensionAPI) {
 		autoConfig ??= loadAutoModeConfig(os.homedir());
 		if (!autoConfig.logDecisions) return;
 		try {
-			const file = join(ctx.sessionManager.getSessionDir(), "auto-mode-decisions.jsonl");
+			// Beside the transcripts; a session-less run's private temp dir, never the project.
+			const file = join(sessionResultsDir(ctx), "auto-mode-decisions.jsonl");
 			appendDecision(file, decisionEntry({ sessionId: ctx.sessionManager.getSessionId?.(), ...entry }));
 		} catch {
 			// Logging must never break the gate.
@@ -1267,6 +1270,9 @@ function permissionsExtension(pi: ExtensionAPI) {
 		return run;
 	};
 
+	/** The permission question's description: the tool it asks for. */
+	const describePrompt = (toolName: string) => announcePrompt(pi.events, desktopNotificationText.permission(brand.name, ccToolName(toolName)));
+
 	/** A context overflow judged nothing: ask once, or stop a headless turn. */
 	const transcriptOverflow = async (ctx: ExtensionContext, toolName: string, subject: string, signal = ctx.signal): Promise<ChildGateDecision> => {
 		if (!ctx.hasUI || ctx.mode === "print") {
@@ -1280,10 +1286,11 @@ function permissionsExtension(pi: ExtensionAPI) {
 		const reason = "Auto mode classifier transcript exceeded context window — falling back to manual approval";
 		ctx.ui.notify(reason, "warning");
 		logDecision(ctx, { tool: toolName, subject, outcome: "prompt", source: "user", transcriptTooLong: true, reason });
-		const choice = await serializePrompt(() => signal?.aborted ? Promise.resolve(undefined) : ctx.ui.select(
-			`${reason}\n\n${askTitle(toolName, previewSubject(subject), "mode", false)}`,
-			askOptions(undefined), { signal },
-		), signal);
+		const choice = await serializePrompt(() => {
+			if (signal?.aborted) return Promise.resolve(undefined);
+			announcePrompt(pi.events, desktopNotificationText.reviewFallback(brand.name, ccToolName(toolName)));
+			return ctx.ui.select(`${reason}\n\n${askTitle(toolName, previewSubject(subject), "mode", false)}`, askOptions(undefined), { signal });
+		}, signal);
 		const allowed = !signal?.aborted && choice === YES;
 		logDecision(ctx, { tool: toolName, subject, outcome: allowed ? "allow" : "block", source: "user", transcriptTooLong: true, reason });
 		if (allowed) return undefined;
@@ -1339,6 +1346,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 			if (settled()) return blockOutsideReads ? "block" : "allow";
 			const settingsFile = tildify(productSettingsPath(home), home);
 			const title = `${OUTSIDE_READ_TITLE}\n\n  ${toolName} ${path}\n\n${OUTSIDE_READ_QUESTION}\n\n${OUTSIDE_READ_EXPLAINER(settingsFile)}`;
+			announcePrompt(pi.events, desktopNotificationText.outsideRead(brand.name));
 			const choice = await ctx.ui.select(title, Object.values(OUTSIDE_READ_ANSWERS), { signal });
 			if (signal?.aborted || (choice !== OUTSIDE_READ_ANSWERS.allow && choice !== OUTSIDE_READ_ANSWERS.block)) return "ask_again";
 			outsideReadSeen = true;
@@ -1437,7 +1445,11 @@ function permissionsExtension(pi: ExtensionAPI) {
 		const trustProject = async (withProject: typeof result, firing: TrustFiring) => {
 			const repoDirs = repoWorkspaceDirs().map((dir) => dir.raw);
 			const { title, message } = describeProjectAllow(projectAllowRaw, firing, repoDirs);
-			const approved = (await serializePrompt(() => ctx.ui.confirm(title, message, { signal: ctx.signal }), ctx.signal)) === true;
+			const approved = (await serializePrompt(() => {
+				if (ctx.signal?.aborted) return Promise.resolve(false);
+				announcePrompt(pi.events, desktopNotificationText.projectTrust(brand.name));
+				return ctx.ui.confirm(title, message, { signal: ctx.signal });
+			}, ctx.signal)) === true;
 			if (ctx.signal?.aborted) return;
 			if (approved) {
 				projectAllowTrusted = true;
@@ -1613,9 +1625,10 @@ function permissionsExtension(pi: ExtensionAPI) {
 			cause: result.cause,
 			home: os.homedir(),
 		});
-		const { choice, unanswered } = await askMaybeTimed(pausedResume, title, (show) => serializePrompt(show, ctx.signal), (text, timeout) =>
-			ctx.ui.select(text, askOptions(grant), { signal: ctx.signal, timeout }),
-		);
+		const { choice, unanswered } = await askMaybeTimed(pausedResume, title, (show) => serializePrompt(show, ctx.signal), (text, timeout) => {
+			describePrompt(event.toolName);
+			return ctx.ui.select(text, askOptions(grant), { signal: ctx.signal, timeout });
+		});
 		if (ctx.signal?.aborted) return { block: true, reason: refusalText({ kind: "stoppedWhileWaiting", who: "turn" }) };
 		if (unanswered) {
 			logDecision(ctx, { tool: event.toolName, subject: matchSubject, outcome: "block", source: "user", reason: "resume prompt unanswered" });
@@ -1801,9 +1814,10 @@ function permissionsExtension(pi: ExtensionAPI) {
 		const childPrompt = <T>(show: () => Promise<T>): Promise<T | undefined> =>
 			serializePrompt(() => (call.signal?.aborted ? Promise.resolve(undefined) : show()), call.signal);
 		const grant = sessionGrant({ toolName: normalizedTool, subject, cwd, mode, cause: result.cause, home: os.homedir() });
-		const { choice, unanswered } = await askMaybeTimed(pausedResume, title, childPrompt, (text, timeout) =>
-			ctx.ui.select(text, askOptions(grant), { signal: call.signal, timeout }),
-		);
+		const { choice, unanswered } = await askMaybeTimed(pausedResume, title, childPrompt, (text, timeout) => {
+			describePrompt(toolName);
+			return ctx.ui.select(text, askOptions(grant), { signal: call.signal, timeout });
+		});
 		if (call.signal?.aborted) return { block: true, reason: refusalText({ kind: "stoppedWhileWaiting", who: "agent" }) };
 		if (unanswered) {
 			logDecision(ctx, { tool: toolName, subject, outcome: "block", source: "user", reason: "resume prompt unanswered" });
@@ -2234,7 +2248,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 	 * surfaces a warning rather than blocking it: the work has already happened, so
 	 * the useful move is to make sure the model and the user see it.
 	 */
-	const reviewFlagged = (verdict: HandBackVerdict) => `<system-reminder>\n${handBackWarning(verdict)}\n</system-reminder>`;
+	const reviewFlagged = (verdict: HandBackVerdict) => handBackFlagBlock(handBackWarning(verdict));
 
 	// Review a finished run: its actions and its report. Returns the verdict to
 	// surface, or undefined when the run is fine. Shared by the foreground

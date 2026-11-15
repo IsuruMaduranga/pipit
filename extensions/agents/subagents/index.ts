@@ -39,7 +39,7 @@ import { SUBAGENT_ACTIONS_CHANNEL, type SubagentActionsPayload } from "../../lib
 import { type AgentDefinition, agentFileSources, agentSourcesStamp, BUNDLED_AGENTS_DIR, discoverAgents } from "../../lib/agents/agent-catalog.ts";
 import { findConfigured, modelIdentity, modelSpec, supportsImageInput } from "../../lib/models/model-policy.ts";
 import { MODEL_UNUSABLE_CHANNEL, type ModelUnusableEvent, withoutUnusable } from "../../lib/models/model-unusable.ts";
-import { applicableSubagentDefault, loadSubagentDefault, persistSubagentModel, SUBAGENT_MODEL_KNOB, type SubagentDefault } from "../../lib/models/subagent-default.ts";
+import { applicableSubagentDefault, AUTO_SUBAGENT_MODEL, loadSubagentDefault, persistSubagentModel, SUBAGENT_MODEL_KNOB, type SubagentDefault } from "../../lib/models/subagent-default.ts";
 import {
 	expensiveModelGate,
 	resolveSubagentModel,
@@ -50,6 +50,7 @@ import {
 	subagentModelsReminder,
 	subagentStatusModel,
 } from "../../lib/models/subagent-model.ts";
+import { configuredDefaultLine, knobsNotApplied } from "../../lib/models/subagent-model-text.ts";
 import { modelPickerComponent, pickerSpec, toPickerEntries, type PickerEntry } from "../../lib/models/model-picker.ts";
 import { chosenModelWarnings } from "../../lib/models/model-choice-warnings.ts";
 import { readSuggestNewerModels, SETTINGS_DISPLAY } from "../../lib/profile/product-settings.ts";
@@ -70,7 +71,7 @@ import { type DescriptionForm, followDescriptionForm, registerVariantTool } from
 import { prepareAgentArguments } from "./agent-args.ts";
 import { projectConfigDirName } from "../../lib/profile/sources.ts";
 import { instructionFileNames } from "../../lib/context/instructions.ts";
-import { pendingClaimReminder, runningAfterCompactionReminder } from "./pending-claim.ts";
+import { runningAfterCompactionReminder } from "./running-after-compaction.ts";
 import { watchPermissionBridge } from "../../lib/agents/subagent-gate.ts";
 import { watchHookBridge } from "../../lib/agents/hook-bridge.ts";
 import { CONTEXT_ORDER, REMINDER_CHANNEL, RENDER_CHANNEL, type RenderRequest, type ReminderPayload, toldBlockFact } from "../../lib/request/reminders.ts";
@@ -91,6 +92,7 @@ import {
 	agentMessage,
 	agentSummary,
 	createTaskNotifier,
+	TASK_COMPLETION_KEY,
 	type HandBackVerdict,
 	handBackPointer,
 	handBackWarning,
@@ -101,7 +103,7 @@ import {
 	withReview,
 } from "../../lib/notify/notifications.ts";
 import { persistIfLarge, sessionResultsDir } from "../../lib/request/persisted-output.ts";
-import { toolRenderers, customMessageText, expandHintFor, liveUiCtx, notificationComponent, safeThemeBold, safeThemePaint, truncateLine } from "../../lib/ui/tui-render.ts";
+import { ClickToggles, clickToExpand, toolRenderers, customMessageText, expandHintFor, liveUiCtx, notificationComponent, safeThemeBold, safeThemePaint, truncateLine } from "../../lib/ui/tui-render.ts";
 import { deriveActivity, type FinishOutcome, LiveRunRegistry } from "./live-runs.ts";
 import { awaitHandBackReview } from "./hand-back-review.ts";
 import type { LiveSink } from "./runner.ts";
@@ -111,7 +113,7 @@ import { SubagentWidget } from "./panel-widget.ts";
 import { type ProseRenderer, renderTranscript } from "./panel-render.ts";
 import { decodeStripKey, editorYieldsDown, isStripEntryKey, type StripKey } from "./panel-keys.ts";
 import { PERMISSION_STATUS_CHANNEL, type PermissionStatus } from "../../lib/rules/modes.ts";
-import { AGENT_VIEW_CHANNEL, type AgentViewAnnouncement, agentViewTarget, userMessageForAgent } from "../../lib/agents/agent-view.ts";
+import { AGENT_VIEW_CHANNEL, AGENT_VIEW_SCROLL_CHANNEL, type AgentViewAnnouncement, type AgentViewScroll, agentViewTarget, scrolledView, userMessageForAgent, viewportScrollFor } from "../../lib/agents/agent-view.ts";
 import { isKeyRelease, keyId, keyText } from "../../lib/ui/key-input.ts";
 import { moveTasksSelection, renderShellDetail, renderTasksDialog, settleTasksView, shellDetailKey, tasksItems, type TasksView } from "./tasks-dialog.ts";
 import { reduceShellKey, shellRows } from "./shell-panel.ts";
@@ -317,13 +319,6 @@ function subagentsExtension(pi: ExtensionAPI) {
 		}
 		return undefined;
 	};
-	/**
-	 * Task ids of background runs spawned during the agent loop now in flight.
-	 * Cleared at `agent_start`; read at `agent_end` to notice a turn that ended
-	 * with an agent still pending, which is the shape of the fabricated-result
-	 * failure (pending-claim.ts, WEAK-MODEL-REVIEW-2026-09-06 H1).
-	 */
-	const spawnedThisLoop = new Set<string>();
 
 	// The live subagent panel (Claude Code's below-editor agent tree): a registry
 	// of every in-process child fed by the runner's live sink, a below-editor
@@ -735,43 +730,17 @@ function subagentsExtension(pi: ExtensionAPI) {
 
 	let shuttingDown = false;
 
-	/**
-	 * The fabricated-result backstop (pending-claim.ts). Only the tiers that were
-	 * measured to need it: a frontier model that correctly said "I'm waiting"
-	 * would get the reminder on every delegating turn for nothing, and the
-	 * trigger fires on correct behaviour as readily as on the failure.
-	 */
-	const backstopApplies = () => {
-		const tier = requestTier();
-		return tier === "cheap" || tier === "tiny";
-	};
 	/** A run that is still working: a live child, or a resident with a turn pending. */
 	const stillRunning = (taskId: string): boolean => {
 		const resident = residents.get(taskId);
 		return (resident !== undefined && residentPending(resident)) || runningIds.has(taskId);
 	};
 	pi.on("agent_start", () => {
-		spawnedThisLoop.clear();
 		parentBusy = true;
 		return undefined;
 	});
 	pi.on("agent_settled", () => {
 		parentBusy = false;
-	});
-	pi.on("agent_end", () => {
-		const spawned = [...spawnedThisLoop];
-		spawnedThisLoop.clear();
-		// Tier check first: on a frontier session the backstop never fires, so the
-		// lookups below would be discarded work on every turn that delegated.
-		if (!backstopApplies()) return undefined;
-		const pending = spawned
-			.filter(stillRunning)
-			.map((taskId) => registry.resolve(taskId))
-			.filter((record): record is AgentRunRecord => record !== undefined)
-			.map((record) => ({ name: record.name, taskId: record.taskId }));
-		const text = pendingClaimReminder(pending);
-		if (text) pi.events.emit(REMINDER_CHANNEL, { text });
-		return undefined;
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -944,7 +913,14 @@ function subagentsExtension(pi: ExtensionAPI) {
 	 * retargets to the next agent, Enter/esc close it and the main transcript is
 	 * back.
 	 */
-	let view: { retarget(taskId: string): void; scrollBy(delta: number): void; close(): void } | undefined;
+	let view: { retarget(taskId: string): void; scrollWith(move: AgentViewScroll): void; close(): void } | undefined;
+	/** pi's keybindings, from the view's factory: the viewport keys are read under the user's own bindings. */
+	let viewKeys: { matches(data: string, binding: string): boolean } | undefined;
+	// The wheel over the prompt editor while a view is open (branding's PromptEditor).
+	pi.events.on(AGENT_VIEW_SCROLL_CHANNEL, (data) => {
+		const move = data as AgentViewScroll | undefined;
+		if (move && typeof move.action === "string") view?.scrollWith(move);
+	});
 	/** Rows kept clear at the bottom: token counter + editor(3) + mode line + strip hint + strip rows + shell section + other strips + cwd/status(2) + one spare. */
 	const viewReserve = () => {
 		const shellLines = panel.shellLineCount();
@@ -975,7 +951,9 @@ function subagentsExtension(pi: ExtensionAPI) {
 		let closed = false;
 		let repaintFn: (() => void) | undefined;
 		let doneFn: ((result: null) => void) | undefined;
-		/** Fullscreen only: turns pi's own viewport scrolling into view scrolling. */
+		/** The view's height at its last render, for page-sized scrolls. */
+		let shownHeight = 8;
+		/** Fullscreen only: folds any move pi-tui makes to main under the view into the view (viewport-mirror.ts). */
 		let mirror: ViewportMirror | undefined;
 		const entry = {
 			retarget(id: string) {
@@ -987,14 +965,23 @@ function subagentsExtension(pi: ExtensionAPI) {
 				announceView(id);
 				repaintFn?.();
 			},
-			scrollBy(delta: number) {
-				scroll = Math.max(0, Math.min(maxScroll, scroll + delta));
+			/** A page, half page, line, end or wheel move (lib/agents/agent-view.ts). */
+			scrollWith(move: AgentViewScroll) {
+				const next = scrolledView(scroll, maxScroll, shownHeight, move);
+				if (next === scroll) return;
+				scroll = next;
+				// Park main to match, so a move pi-tui makes to it next (a PageDown it
+				// consumed, a wheel over the strip) has room to register either way.
+				mirror?.park(next);
 				repaintFn?.();
 			},
 			close() {
 				if (closed) return;
 				closed = true;
-				if (view === entry) view = undefined;
+				if (view === entry) {
+					view = undefined;
+					viewKeys = undefined;
+				}
 				mirror?.restore();
 				mirror = undefined;
 				panel.setView(undefined);
@@ -1009,8 +996,9 @@ function subagentsExtension(pi: ExtensionAPI) {
 			const prose = await getProse(ctx);
 			if (closed) return;
 			await panelUi(pi.events, ctx.ui).custom<null>(
-				(tui, theme, _keybindings, done) => {
+				(tui, theme, keybindings, done) => {
 					doneFn = done;
+					viewKeys = keybindings as typeof viewKeys;
 					// close() raced ahead of the factory — dissolve as soon as we exist.
 					if (closed) queueMicrotask(() => done(null));
 					const paint = { fg: safeThemePaint(theme), bold: safeThemeBold(theme) };
@@ -1028,8 +1016,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 					if (viewport && !closed) mirror = new ViewportMirror(viewport);
 					return {
 						render: (width: number) => {
-							// The page keys and the wheel scroll pi's main viewport, under
-							// this overlay; take the move as ours and park main again.
+							// A move pi-tui made to main under this overlay is the view's.
 							if (mirror) {
 								const next = mirror.absorb(scroll, maxScroll);
 								if (next !== scroll) {
@@ -1039,6 +1026,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 							}
 							// Keyed by height too: a resize or another strip changing size moves the room.
 							const viewHeight = height();
+							shownHeight = viewHeight;
 							if (cache?.width === width && cache.height === viewHeight) return cache.lines;
 							const run = liveRuns.get(currentId);
 							let lines: string[];
@@ -1054,6 +1042,13 @@ function subagentsExtension(pi: ExtensionAPI) {
 						},
 						invalidate: () => {
 							cache = undefined;
+						},
+						// The wheel over the view scrolls it; reported handled, so pi-tui
+						// does not scroll the main transcript under the overlay instead.
+						handleMouse: (event: { type: string; wheelDelta?: number }) => {
+							if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+							entry.scrollWith({ action: "wheel", lines: event.wheelDelta });
+							return { handled: true };
 						},
 						dispose: () => live.cleanup(),
 					};
@@ -1075,6 +1070,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 			panel.setFocus(undefined);
 		};
 		const editorEmpty = () => (panel.editorBaseline as { getText?(): string } | undefined)?.getText?.() === "";
+		const editorMenuOpen = () => (panel.editorBaseline as { isShowingAutocomplete?(): boolean } | undefined)?.isShowingAutocomplete?.() === true;
 		type KeyResult = { consume: boolean } | undefined;
 		// Actions shared by both key modes (browse and read), declared once so the
 		// two switches below never drift. esc consumes only when idle — a streaming
@@ -1160,14 +1156,19 @@ function subagentsExtension(pi: ExtensionAPI) {
 				// plain typing. Claude Code's order: the FIRST ↓ lands on the shells
 				// chip when shells are running; the next ↓ moves into the agent rows.
 				if (panel.focusIndex === undefined && !panel.shellChipFocused) {
-					// Viewing an agent with the editor focused: the page keys scroll the
-					// view, and Esc in an empty editor goes back to main.
+					// Viewing an agent with the editor focused: the viewport keys scroll
+					// the view under the user's own bindings (an open autocomplete menu
+					// keeps them), and Esc in an empty editor goes back to main. In
+					// fullscreen the keys get here only when the editor captures them
+					// (pi-tui 1.5, branding's PromptEditor); otherwise pi-tui moves
+					// main and the view's mirror takes the move.
 					if (view && panel.editorFocused()) {
-						const id = keyId(data);
-						if (id === "pageUp" || id === "pageDown") {
-							view.scrollBy(id === "pageUp" ? 10 : -10);
+						const scroll = viewKeys && !editorMenuOpen() ? viewportScrollFor((binding) => viewKeys!.matches(data, binding)) : undefined;
+						if (scroll) {
+							view.scrollWith(scroll);
 							return { consume: true };
 						}
+						const id = keyId(data);
 						if (id === "escape" && editorEmpty()) {
 							closeView();
 							return { consume: true };
@@ -1230,7 +1231,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 					case "pageDown":
 						// Scroll an open view; with none open, swallow so the page keys
 						// never leak into the editor while the strip holds focus.
-						view?.scrollBy(decoded.key === "pageUp" ? 10 : -10);
+						view?.scrollWith({ action: decoded.key });
 						return { consume: true };
 				}
 			});
@@ -1244,18 +1245,21 @@ function subagentsExtension(pi: ExtensionAPI) {
 	// A message is addressed from the agent's task id; its headline names the
 	// agent, from the live registry or the message's own details (a resumed
 	// session has no live runs).
+	const clicked = new ClickToggles();
 	for (const customType of ["subagent-message", "subagent-result"]) {
 		pi.registerMessageRenderer(customType, (message, options, theme) => {
 			const details = (message as { details?: { taskId?: unknown; name?: unknown } }).details;
 			const agentName = (from: string): string | undefined =>
 				liveRuns.get(from)?.name ?? (details?.taskId === from && typeof details.name === "string" ? details.name : undefined);
-			return notificationComponent(theme, customMessageText(message.content), options.expanded, { agentName, hint: expandHintFor(options) });
+			return clickToExpand(clicked, message, options.expanded, (expanded) =>
+				notificationComponent(theme, customMessageText(message.content), expanded, { agentName, hint: expandHintFor(options) }),
+			);
 		});
 	}
 
-	// A hand-back the model already read through task_output (block: true on the
-	// agent's task) is withdrawn — One Code's task_output returns the full report,
-	// so the message and its pointer would only repeat it (see decisions).
+	// task_output on a finished agent returns its report, and the hand-back is
+	// withdrawn where pi does not hold it yet; one pi already queued lands as
+	// well (lib/notify/notifications.ts TASK_OUTPUT_DELIVERED_CHANNEL).
 	const notifier = createTaskNotifier(pi, { withdrawOnDelivery: true });
 	/** Every subagent notification; silent during shutdown (a teardown kill is not news). */
 	const notify = (customType: string, text: string, details?: Record<string, unknown>) => {
@@ -1348,7 +1352,18 @@ function subagentsExtension(pi: ExtensionAPI) {
 		const status: TaskStatus = opts.stopped ? "killed" : opts.outcome.failed ? "failed" : "completed";
 		const warning = opts.review ? handBackWarning(opts.review) : undefined;
 		const record = registry.resolve(opts.from);
-		const details = { ...opts.details, taskId: opts.taskId, name: opts.name, failed: status === "failed", reviewed: opts.review !== undefined };
+		// task_output may withdraw only a hand-back its own result repeats: not
+		// one carrying auto mode's flag, and not a later turn's update, since
+		// task_output returns the first turn's report for that task id.
+		const withdrawable = warning === undefined && opts.details?.update !== true;
+		const details = {
+			...opts.details,
+			taskId: opts.taskId,
+			name: opts.name,
+			failed: status === "failed",
+			reviewed: opts.review !== undefined,
+			...(withdrawable ? { [TASK_COMPLETION_KEY]: true } : {}),
+		};
 		const envelope = (result: string) =>
 			taskNotification({
 				kind: "agent",
@@ -1465,10 +1480,15 @@ function subagentsExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	/** Session dir for a run's persisted child session; undefined → child runs --no-session. */
+	/**
+	 * Session dir for a run's persisted child session and output log; undefined
+	 * → child runs --no-session. Under the session's harness dir
+	 * (`sessionResultsDir`): a session-less parent's is its private temp dir,
+	 * where the bare session dir ("") put `subagents/` in the project.
+	 */
 	const runSessionDir = (ctx: ExtensionContext, taskId: string): string | undefined => {
 		try {
-			const dir = join(ctx.sessionManager.getSessionDir(), "subagents", taskId);
+			const dir = join(sessionResultsDir(ctx), "subagents", taskId);
 			mkdirSync(dir, { recursive: true });
 			return dir;
 		} catch {
@@ -1793,6 +1813,11 @@ function subagentsExtension(pi: ExtensionAPI) {
 		}
 	};
 
+	/** Forget prepared runs that will not launch, so list_agents and SendMessage never offer them. */
+	const forgetRuns = (runs: PreparedRun[]) => {
+		for (const p of runs) registry.remove(p.record.taskId);
+	};
+
 	/**
 	 * Launch one prepared run as a background resident (Claude Code parity):
 	 * it returns as soon as the child starts, the report arrives as a steered
@@ -1807,11 +1832,16 @@ function subagentsExtension(pi: ExtensionAPI) {
 		ctx: ExtensionContext,
 		runtime: SubagentRuntime,
 		{ sessionFile, toolCallId, forkMessages }: { sessionFile?: string; toolCallId?: string; forkMessages?: Message[] },
-	): Promise<{ launched: boolean; line: string }> => {
-		const ended = () => {
+	): Promise<{ launched: boolean; line: string; logPath?: string }> => {
+		// A run that did not launch is forgotten here, on every failure path, so
+		// neither list_agents nor SendMessage ever offers it, and no call stays
+		// mapped to it.
+		const failed = (line: string) => {
 			registry.remove(p.record.taskId);
-			return { launched: false, line: launchLine({ kind: "sessionEnded", name: p.record.name }) };
+			mainCallFor.delete(p.record.taskId);
+			return { launched: false, line };
 		};
+		const ended = () => failed(launchLine({ kind: "sessionEnded", name: p.record.name }));
 		if (shuttingDown) return ended();
 		if (toolCallId) mainCallFor.set(p.record.taskId, toolCallId);
 		// Captured as a string: onExit runs from a `.finally` long after this
@@ -1822,7 +1852,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 			try {
 				worktree = await isolateInWorktree(parentCwd, p.record, p.request.name);
 			} catch (error) {
-				return { launched: false, line: launchLine({ kind: "worktreeFailed", name: p.record.name, osMessage: (error as Error).message }) };
+				return failed(launchLine({ kind: "worktreeFailed", name: p.record.name, osMessage: (error as Error).message }));
 			}
 			// Shutdown can begin while git creates the worktree: build no child
 			// after its sweep, and remove the worktree within its grace.
@@ -1857,6 +1887,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 		resident.turnHandlers.push((outcome, review, stopped) => {
 			task.status = stopped ? "stopped" : outcome.failed ? "failed" : "completed";
 			task.finishedAt = Date.now();
+			task.reviewWarning = review ? handBackWarning(review) : undefined;
 			firstTurnOutput = outcome.output;
 			finish();
 			notifyHandBack({
@@ -1978,12 +2009,10 @@ function subagentsExtension(pi: ExtensionAPI) {
 			},
 		}).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
 		if (started instanceof Error) {
-			// The child never started: settle its panel row and forget the run, so
-			// neither the panel nor list_agents offers it.
+			// The child never started: settle its panel row and forget the run.
 			live.finish(true);
-			registry.remove(p.record.taskId);
 			if (worktree) void cleanupWorktree(parentCwd, worktree);
-			return { launched: false, line: launchLine({ kind: "startFailed", name: p.record.name, osMessage: started.message }) };
+			return failed(launchLine({ kind: "startFailed", name: p.record.name, osMessage: started.message }));
 		}
 		const handle = started;
 		resident.handle = handle;
@@ -2015,6 +2044,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 		return {
 			launched: true,
 			line: launchLine({ kind: "running", name: p.record.name, taskId: p.record.taskId, ...(logPath ? { logPath } : {}) }),
+			...(logPath ? { logPath } : {}),
 		};
 	};
 
@@ -2063,10 +2093,13 @@ function subagentsExtension(pi: ExtensionAPI) {
 		// fork launched after shutdown's stop-all sweep would outlive it.
 		const runtime = await runtimeOrError(ctx);
 		if (typeof runtime === "string") {
-			registry.remove(taskId);
+			forgetRuns([prepared]);
 			return { error: `Cannot fork: ${runtime}` };
 		}
-		if (shuttingDown) return { error: "The session ended before the fork started." };
+		if (shuttingDown) {
+			forgetRuns([prepared]);
+			return { error: "The session ended before the fork started." };
+		}
 		const { launched, line } = await launchResident(prepared, ctx, runtime, { sessionFile, forkMessages: request.messages });
 		if (shuttingDown) {
 			void stopAgent(taskId);
@@ -2354,23 +2387,29 @@ function subagentsExtension(pi: ExtensionAPI) {
 			const lines: string[] = [...renamed, ...modelNotes];
 			const runtime = await runtimeOrError(ctx);
 			if (typeof runtime === "string") {
-				// Nothing launched: forget the runs so list_agents and SendMessage never offer them.
-				for (const p of prepared) registry.remove(p.record.taskId);
+				// Nothing launched.
+				forgetRuns(prepared);
 				return refuseCall({ kind: "couldNotStart", problem: runtime });
 			}
+			let outputFile = false;
+			const launchedRecords: AgentRunRecord[] = [];
 			for (const p of prepared) {
-				const { launched, line } = await launchResident(p, ctx, runtime, { sessionFile: sessionFile ?? undefined, toolCallId });
-				if (launched) spawnedThisLoop.add(p.record.taskId);
+				const { launched, line, logPath } = await launchResident(p, ctx, runtime, { sessionFile: sessionFile ?? undefined, toolCallId });
 				lines.push(line);
+				if (launched) launchedRecords.push(p.record);
+				if (logPath) outputFile = true;
 			}
+			// Nothing runs, so no notification will come: fail the call rather
+			// than tell the model to wait (launchResident already forgot the runs).
+			if (launchedRecords.length === 0) return refuseCall({ kind: "noneLaunched", lines });
 			return {
 				content: [
 					{
 						type: "text",
-						text: subagentResultText().launched({ lines }),
+						text: subagentResultText().launched({ lines, running: launchedRecords.length, outputFile }),
 					},
 				],
-				details: { agentRuns: records, background: true },
+				details: { agentRuns: launchedRecords, background: true },
 			};
 		},
 	});
@@ -2443,7 +2482,6 @@ function subagentsExtension(pi: ExtensionAPI) {
 				}
 				// The turn had just ended (settle window): the message rides the next
 				// turn, whose reply nobody has claimed yet — announce it as an update.
-				spawnedThisLoop.add(record.taskId); // arm the anti-fabrication backstop (WEAK-MODEL-REVIEW H1)
 				return {
 					content: [
 						{
@@ -2480,6 +2518,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 			resident.turnHandlers.push((outcome, review, stopped) => {
 				task.status = stopped ? "stopped" : outcome.failed ? "failed" : "completed";
 				task.finishedAt = Date.now();
+				task.reviewWarning = review ? handBackWarning(review) : undefined;
 				replyOutput = outcome.output;
 				finish();
 				// `<task-id>` is this message's task (what task_output resolves); `from=`
@@ -2501,10 +2540,6 @@ function subagentsExtension(pi: ExtensionAPI) {
 			});
 			pi.events.emit(TASK_REGISTER_CHANNEL, task);
 			void resident.handle.send(params.message);
-			// Same anti-fabrication guard as a fresh spawn (WEAK-MODEL-REVIEW H1):
-			// the reply arrives as a notification, so forbid predicting it and arm
-			// the agent_end backstop (keyed by the agent's persistent id).
-			spawnedThisLoop.add(record.taskId);
 			return {
 				content: [
 					{
@@ -2666,6 +2701,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 			settledOutput = `${relocationNote}${outcome.output}`;
 			task.status = stopped ? "stopped" : outcome.failed ? "failed" : "completed";
 			task.finishedAt = Date.now();
+			task.reviewWarning = review ? handBackWarning(review) : undefined;
 			finish();
 			notifyHandBack({
 				from: record.taskId,
@@ -2680,7 +2716,6 @@ function subagentsExtension(pi: ExtensionAPI) {
 			});
 		});
 
-		spawnedThisLoop.add(record.taskId); // arm the anti-fabrication backstop (WEAK-MODEL-REVIEW H1)
 		return {
 			content: [
 				{
@@ -2943,6 +2978,8 @@ function subagentsExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	const subagentKnobs = () => ({ names: knobNames(SUBAGENT_MODEL_KNOB), limit: knobLimit(SUBAGENT_MODEL_KNOB) });
+
 	const showSubagentModelStatus = (ctx: ExtensionContext) => {
 		const configured = loadSubagentDefault(os.homedir());
 		const applicable = applicableSubagentDefault(configured, ctx.model);
@@ -2955,26 +2992,22 @@ function subagentsExtension(pi: ExtensionAPI) {
 		});
 		ctx.ui.notify(
 			[
-				configured
-					? configured.source === "env"
-						? `subagentModel: ${configured.spec} (from ${configured.envVar})` +
-							(applicable ? "" : ` — not applied: ${configured.envVar} is another tool's variable, ${knobLimit(SUBAGENT_MODEL_KNOB)}`)
-						: `subagentModel: ${configured.spec} (from the subagentModel setting)`
-					: "subagentModel: (not set)",
+				configuredDefaultLine(configured, applicable !== undefined, subagentKnobs()),
 				`effective: ${resolution.model ? `${resolution.model.provider}/${resolution.model.id}` : "none"} (${resolution.source})`,
 				...(resolution.notices.length ? [resolution.notices.join("\n")] : []),
 				...(resolution.source === "default" && resolution.model
 					? chosenModelWarnings({ available, sessionModel: ctx.model, chosen: resolution.model, role: "subagent", suggestNewer: readSuggestNewerModels(os.homedir()) }).map((warning) => `! ${warning.text} ${warning.fix}`)
 					: []),
-				"Set it with /subagent <provider/model-id|sonnet|opus|haiku|fable|inherit>, or clear with /subagent clear.",
+				"Set it with /subagent <provider/model-id|sonnet|opus|haiku|fable|inherit|auto>, or clear with /subagent clear.",
 			].join("\n"),
 			"info",
 		);
 	};
 
 	/**
-	 * Persist a chosen subagent default. `inherit` is literal (session model,
-	 * no auth needed); any other spec is validated against the registry and its
+	 * Persist a chosen subagent default. `inherit` (session model) and `auto`
+	 * (the automatic pick on every provider, hiding an inherited variable) are
+	 * literal, no auth needed; any other spec is validated against the registry and its
 	 * auth checked before saving — a default with no credentials would fail
 	 * every subagent spawn. The value is saved as the literal spec, so an alias
 	 * like `sonnet` keeps per-session alias semantics (see model-select.ts).
@@ -2989,6 +3022,20 @@ function subagentsExtension(pi: ExtensionAPI) {
 			}
 			emitModelStatus(ctx);
 			ctx.ui.notify(`Subagent default set to the session model ("inherit", saved to ${SETTINGS_DISPLAY}).`, "info");
+			return;
+		}
+		if (spec === AUTO_SUBAGENT_MODEL) {
+			try {
+				persistSubagentModel(AUTO_SUBAGENT_MODEL, os.homedir());
+			} catch (error) {
+				ctx.ui.notify("Could not save subagent model: " + (error as Error).message, "error");
+				return;
+			}
+			emitModelStatus(ctx);
+			ctx.ui.notify(
+				`Subagent default set to automatic selection on every provider ("auto", saved to ${SETTINGS_DISPLAY}); ${knobsNotApplied(subagentKnobs().names)}.`,
+				"info",
+			);
 			return;
 		}
 
@@ -3051,9 +3098,9 @@ function subagentsExtension(pi: ExtensionAPI) {
 	};
 
 	registerLocalCommand(pi, "subagent", {
-		description: "Set the default model for subagent/workflow runs: /subagent [provider/model-id|inherit|status|clear]",
-		argumentHint: "[provider/model-id|inherit|status|clear]",
-		getArgumentCompletions: (prefix) => extendingCompletions(prefix, ["inherit", "status", "clear"].map((value) => ({ value, label: value }))),
+		description: "Set the default model for subagent/workflow runs: /subagent [provider/model-id|inherit|auto|status|clear]",
+		argumentHint: "[provider/model-id|inherit|auto|status|clear]",
+		getArgumentCompletions: (prefix) => extendingCompletions(prefix, ["inherit", AUTO_SUBAGENT_MODEL, "status", "clear"].map((value) => ({ value, label: value }))),
 		handler: async (args, ctx) => {
 			const typed = args.trim();
 			if (typed === "clear") {
@@ -3070,8 +3117,8 @@ function subagentsExtension(pi: ExtensionAPI) {
 				);
 				return;
 			}
-			if (typed === "inherit") {
-				await applySubagentModelChoice("inherit", ctx);
+			if (typed === "inherit" || typed === AUTO_SUBAGENT_MODEL) {
+				await applySubagentModelChoice(typed, ctx);
 				return;
 			}
 			if (typed === "status") {

@@ -50,6 +50,7 @@ import { feature } from "../../lib/profile/feature.ts";
 import { randomUUID } from "node:crypto";
 import { contentText } from "@earendil-works/pi-ai";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { DESKTOP_NOTIFICATION_CHANNEL, type DesktopNotification } from "../../lib/notify/desktop.ts";
 import { RunOutcomeLatch } from "../../lib/notify/interrupt.ts";
 import { SESSION_WORK_CHANNEL, type SessionWorkQuery } from "../../lib/notify/session-work.ts";
 import { defaultDiscoverRoots } from "../../lib/plugins/plugins.ts";
@@ -95,6 +96,14 @@ const HOOK_MODEL_TEXT_CAP = 20_000;
 // two files (review M2).
 function capHookText(text: string, ctx: HookDispatchCtx, label: string): string {
 	return persistIfLarge(text, { dir: sessionResultsDir(ctx), id: `hook-${label}-${randomUUID()}`, maxBytes: HOOK_MODEL_TEXT_CAP });
+}
+
+/** Which of an event's hooks a dispatch runs, and how far its consent question reaches. */
+interface DispatchMatch {
+	candidates?: string[];
+	ignoreMatcher?: boolean;
+	/** Ask consent for the project's hooks of every event, not this one's only: the user just typed a prompt. */
+	consentForEveryEvent?: boolean;
 }
 
 interface MatchedHook {
@@ -167,7 +176,7 @@ function hooksExtension(pi: ExtensionAPI) {
 	const collectHooks = async (
 		ctx: HookDispatchCtx,
 		event: CcHookEvent,
-		matchValue: { candidates?: string[]; ignoreMatcher?: boolean },
+		matchValue: DispatchMatch,
 	): Promise<MatchedHook[]> => {
 		const loaded = loadHookSettings(ctx.cwd);
 		const pluginSources = loaded.disabled ? [] : loadPluginHooks(defaultDiscoverRoots(getAgentDir(), ctx.cwd), loaded.diagnostics);
@@ -176,12 +185,20 @@ function hooksExtension(pi: ExtensionAPI) {
 		}
 
 		const projectSources = loaded.sources.filter((s) => s.scope === "project" || s.scope === "local");
-		const hasProjectHooks = projectSources.some((s) => s.config[event]?.length);
+		// The user's own prompt asks for consent to the project's hooks of every
+		// event: a hook for an event that never asks (Notification) is approved
+		// here, while the user is present. A loaded source always holds some
+		// event's hooks (settings.ts keeps no empty one).
+		const hasProjectHooks = projectSources.some((s) => matchValue.consentForEveryEvent || s.config[event]?.length);
 		let projectAllowed = true;
 		if (hasProjectHooks) {
 			projectAllowed = await projectHooksApproved(ctx.cwd, projectSources, {
 				hasUI: ctx.hasUI,
-				noPrompt: ctx.sessionEnded,
+				// A Notification fires when the user is away (a prompt waiting, the
+				// session idle): no consent dialog there, so unapproved project hooks
+				// are skipped until the user's next prompt asks (consentForEveryEvent)
+				// or a stored approval allows them.
+				noPrompt: ctx.sessionEnded || event === "Notification",
 				signal: ctx.signal,
 				confirm: (title, message) => consentDialog(pi.events, (signal) => ctx.ui.confirm(title, message, { signal: signal && ctx.signal ? AbortSignal.any([signal, ctx.signal]) : signal ?? ctx.signal })),
 				notify: (message) => notify(ctx, message),
@@ -223,7 +240,7 @@ function hooksExtension(pi: ExtensionAPI) {
 	const dispatch = async (
 		ctx: HookDispatchCtx,
 		event: CcHookEvent,
-		matchValue: { candidates?: string[]; ignoreMatcher?: boolean },
+		matchValue: DispatchMatch,
 		payloadOrFactory: HookStdinPayload | (() => Promise<HookStdinPayload | undefined>),
 		/** Runs once, only when hooks will actually run — the point where a caller can snapshot state the hooks may change. */
 		willRun?: () => void,
@@ -404,7 +421,7 @@ function hooksExtension(pi: ExtensionAPI) {
 		await drainSessionStart();
 		if (gen !== sessionGen) return { action: "handled" as const };
 		const payload: HookStdinPayload = { ...basePayload(ctx, "UserPromptSubmit"), prompt: event.text };
-		const outcome = await dispatch(ctx, "UserPromptSubmit", { ignoreMatcher: true }, payload);
+		const outcome = await dispatch(ctx, "UserPromptSubmit", { ignoreMatcher: true, consentForEveryEvent: true }, payload);
 		if (gen !== sessionGen) return { action: "handled" as const };
 		if (outcome.block) {
 			notify(ctx, `Prompt blocked by UserPromptSubmit hook: ${outcome.block.reason}`);
@@ -506,6 +523,24 @@ function hooksExtension(pi: ExtensionAPI) {
 		// await attaches — the real error still surfaces there.
 		sessionStartPending = dispatchSessionStart(ctx, reason === "new" ? "clear" : reason, gen);
 		sessionStartPending.catch(() => {});
+	});
+
+	// ---- Notification ---------------------------------------------------------
+	// Claude Code runs the Notification hooks with every desktop notification
+	// (a prompt waiting, the session idle), matched on notification_type. The
+	// desktop-notify extension announces each one; it sends none after
+	// session_shutdown, and a notification from an ended session is dropped here.
+	pi.events.on(DESKTOP_NOTIFICATION_CHANNEL, (data) => {
+		const notification = data as Partial<DesktopNotification> | undefined;
+		const ctx = lastCtx;
+		if (!ctx || sessionAbort.signal.aborted || typeof notification?.message !== "string" || typeof notification.notificationType !== "string") return;
+		const payload: HookStdinPayload = {
+			...basePayload(ctx, "Notification"),
+			message: notification.message,
+			...(notification.title !== undefined ? { title: notification.title } : {}),
+			notification_type: notification.notificationType,
+		};
+		void dispatch(ctx, "Notification", { candidates: [notification.notificationType] }, payload);
 	});
 
 	// ---- Subagent bridge ----------------------------------------------------

@@ -24,6 +24,7 @@
  */
 
 import { brandedId } from "../../lib/profile/brand.mjs";
+import { sessionResultsDir } from "../../lib/request/persisted-output.ts";
 import { feature } from "../../lib/profile/feature.ts";
 import { prepareWorkflowArguments } from "./args.ts";
 import { CHILD_WROTE_CHANNEL, type ChildWrote } from "../../lib/agents/child-writes.ts";
@@ -55,6 +56,8 @@ import {
 	toolRenderers,
 	customMessageText,
 	expandHintFor,
+	ClickToggles,
+	clickToExpand,
 	notificationComponent,
 	safeThemeBold,
 	safeThemePaint,
@@ -81,7 +84,7 @@ import { sessionWorkCwd } from "../../lib/agents/worktree-channel.ts";
 import { followEnteredWorktree } from "../../lib/agents/worktree-isolation.ts";
 import { isKeyRelease, keyId } from "../../lib/ui/key-input.ts";
 import { projectConfigDirName } from "../../lib/profile/sources.ts";
-import { panelUi } from "../../lib/ui/panel-focus.ts";
+import { PAGING_PANEL, panelUi } from "../../lib/ui/panel-focus.ts";
 import { dockRowsReporter, trackDockRows } from "../../lib/ui/dock-rows.ts";
 import { queryDeferred } from "../../lib/request/deferred.ts";
 import { workflowResultText } from "./text.ts";
@@ -161,8 +164,9 @@ function workflowExtension(pi: ExtensionAPI) {
 		);
 	};
 
+	const clicked = new ClickToggles();
 	pi.registerMessageRenderer(WORKFLOW_RESULT_TYPE, (message, options, theme) =>
-		notificationComponent(theme, customMessageText(message.content), options.expanded, { hint: expandHintFor(options) }),
+		clickToExpand(clicked, message, options.expanded, (expanded) => notificationComponent(theme, customMessageText(message.content), expanded, { hint: expandHintFor(options) })),
 	);
 
 	// The description carries the session's size guideline (description.ts);
@@ -189,7 +193,9 @@ function workflowExtension(pi: ExtensionAPI) {
 		parameters: workflowParams(text),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			lastCtx = ctx;
-			const sessionDir = ctx.sessionManager.getSessionDir();
+			// Runs persist under the session's harness dir; a session-less run's is its
+			// private temp dir (pi's session dir is "" there, which named the project).
+			const sessionDir = sessionResultsDir(ctx);
 
 			let script: string | undefined;
 			try {
@@ -520,7 +526,7 @@ async function openWorkflowViewer(
 	stripRows: () => number,
 	opts?: { height?: "full" | "half"; runIndex?: number },
 ): Promise<void> {
-	await panelUi(events, ctx.ui).custom<null>((tui, theme, _keybindings, done) => {
+	await panelUi(events, ctx.ui, PAGING_PANEL).custom<null>((tui, theme, _keybindings, done) => {
 		const paint = { fg: safeThemePaint(theme), bold: safeThemeBold(theme) };
 
 		// Newest run first, so the viewer opens on the latest.

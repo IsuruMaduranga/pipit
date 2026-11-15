@@ -1,13 +1,17 @@
 /**
- * Viewport mirror for the agent view (pure; no pi imports).
+ * Viewport mirror for the agent view (pure; no pi imports): the fallback for
+ * every move pi-tui makes to the main transcript while a view covers it.
  *
- * In pi's fullscreen mode the terminal's scroll input (PageUp/PageDown, the
- * mouse wheel, Ctrl+Home/Ctrl+End, plain Home/End before pi 1.0.3) is taken
- * by pi-tui's own viewport handler before any extension input listener runs
- * (findings §10), and it scrolls the main transcript. The agent view is an
- * overlay over that transcript, so the user saw nothing move in the view while
- * main, hidden below it, scrolled away and stayed scrolled up after the view
- * closed.
+ * In pi's fullscreen mode pi-tui's own viewport handler takes the terminal's
+ * scroll input (PageUp/PageDown and the other viewport keys, a wheel over rows
+ * that do not take it) before any extension input listener runs (findings
+ * §10), and scrolls the main transcript. pi-tui 1.5 hands the keys on instead
+ * when the focused editor sets `capturesViewportInput`, which One Code's
+ * prompt editor does while a view is open; the subagents extension then
+ * scrolls the view itself. Where that does not happen (pi 1.0 to 1.4, the
+ * prompt editor not installed, a wheel over the strip or footer), main moves
+ * under the view, which shows nothing, and stays scrolled up after the view
+ * closes.
  *
  * The mirror turns those moves into agent-view scrolling, as Claude Code
  * scrolls whatever transcript is on screen: each frame it reads how far the
@@ -15,7 +19,7 @@
  * view, and parks main again. Main is parked above its bottom by up to the
  * view's own scroll (at most half main's range), so a later move down has room
  * to register too. `restore()` puts main back where it was when the view
- * opened.
+ * opened, so main is never left displaced.
  *
  * Only the main transcript's range can register a move: when main is shorter
  * than one screen, the page keys move nothing and the view cannot see them.
