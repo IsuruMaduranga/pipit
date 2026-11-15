@@ -39,6 +39,8 @@ function toolTexts(live: LiveTools): NamedText[] {
 	push("exit_plan_mode", "plan-mode", planMode.descriptions.exit_plan_mode, "exit_plan_mode");
 	for (const planExists of [true, false]) push(`plan mode reminder${planExists ? " (file exists)" : ""}`, "plan-mode", planMode.reminder({ planFile: "/p.md", planExists }));
 	push("tool_search", "tool-search", toolSearch.description);
+	for (const [tool, hint] of Object.entries(toolSearch.listingHints ?? {})) push(`listing line ${tool}`, "tool-search", hint, tool);
+	push("listing close", "tool-search", toolSearch.listingClose ?? "", "tool_search");
 	push("monitor", "background", background.monitor.description, "monitor");
 	push("task_output", "background", background.tasks.outputDescription, "task_output");
 	for (const firm of [true, false]) push(`auto-mode note${firm ? " firm" : ""}`, undefined, permissions.autoModeNote({ firm }));
