@@ -131,5 +131,7 @@ describe("the language-server requests", () => {
 		expect(isUnknownMethod(refused("java.lang.NullPointerException"))).toBe(false);
 		expect(isUnknownMethod(refused())).toBe(false);
 		expect(isUnknownMethod(undefined)).toBe(false);
+		// The protocol's own code, from a server that uses it.
+		expect(isUnknownMethod({ method, code: -32601, message: "Unhandled method" })).toBe(true);
 	});
 });

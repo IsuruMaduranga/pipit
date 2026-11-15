@@ -39,7 +39,7 @@ const LISTING_HINTS: Readonly<Record<string, string>> = {
 	task_list: "Load it to see the whole to-do list and what is still open.",
 	task_output: "Load it when your next step needs a background task's output before its notification arrives, or to look at one while it runs.",
 	task_stop: "Load it to end a background shell or agent you no longer need.",
-	SendMessage: "Load it to give an agent you started more instructions, or to pick up one that has finished.",
+	SendMessage: "Load it to message another agent: to give one you started more instructions or pick up one that has finished, or, as a fork, to report to the session that started you.",
 	enter_plan_mode: "Load it before a change across several files whose design is still open, or when the user wants a plan first.",
 	exit_plan_mode: "Load it in plan mode once the plan file is complete, to ask the user to approve it.",
 	web_search: "Load it to find current information on the web, such as a third-party API's documentation or a recent release.",

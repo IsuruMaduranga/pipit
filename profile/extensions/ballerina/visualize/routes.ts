@@ -171,9 +171,10 @@ export function projectInfoRequest(pkg: ViewPackage): ModelRequest {
  * server answers to `projectInfoRequest`. It answers a plain "Internal
  * error." (JSON-RPC -32603) like any other failure; only the error's data
  * names the unknown request (working-docs/findings/02-language-server/stock-server.md,
- * "An unknown method").
+ * "An unknown method"). The protocol's own code for it, -32601, counts too.
  */
 export function isUnknownMethod(detail: LspErrorDetail | undefined): boolean {
+	if (detail?.code === -32601) return true;
 	if (!detail || detail.data === undefined) return false;
 	const data = typeof detail.data === "string" ? detail.data : JSON.stringify(detail.data);
 	return /UnsupportedOperationException: The json request '[^']*' is unknown/.test(data);
