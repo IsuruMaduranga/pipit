@@ -121,9 +121,47 @@ describe("an existing project", () => {
 		const before = read(cwd, "Ballerina.toml");
 		expect(() => create(cwd, "first")).toThrow(CreateError);
 		mkdirSync(join(cwd, "taken"));
-		expect(() => create(cwd, "taken")).toThrow(/already exists, and nothing is overwritten/);
+		expect(() => create(cwd, "taken")).toThrow(/taken already exists: it is an empty folder, not one of this project's integrations\. Nothing was created or overwritten\./);
 		expect(read(cwd, "Ballerina.toml")).toBe(before);
 		expect(readdirSync(join(cwd, "taken"))).toEqual([]);
+	});
+
+	const refusal = (cwd: string, name: string) => {
+		try {
+			create(cwd, name);
+		} catch (error) {
+			return (error as Error).message;
+		}
+		return "";
+	};
+
+	it("names the fix for both cases when the integration exists, and lists its .bal files", () => {
+		const cwd = project('[workspace]\npackages = []\n');
+		create(cwd, "done");
+		const message = refusal(cwd, "done");
+		expect(message).toContain(`The integration ${join(cwd, "done")} already exists, and nothing is overwritten.`);
+		expect(message).toContain("read its .bal files once (agents.bal, automation.bal, config.bal, connections.bal, data_mappings.bal, functions.bal, main.bal, types.bal)");
+		expect(message).toContain("Do not call create_integration for it again.");
+		expect(message).toContain("call create_integration with another name");
+	});
+
+	it("says a file is in the way, and never sends the model to write code into it", () => {
+		const cwd = project('[workspace]\npackages = []\n');
+		writeFileSync(join(cwd, "afile"), "x");
+		const message = refusal(cwd, "afile");
+		expect(message).toBe(`${join(cwd, "afile")} already exists: it is a file. Nothing was created or overwritten. Call create_integration with another name, or ask the user to remove or rename what is at that path.`);
+		expect(message).not.toContain("write the code");
+		expect(read(cwd, "afile")).toBe("x");
+	});
+
+	it("says a folder the project does not list is not one of its integrations", () => {
+		const cwd = project('[workspace]\npackages = ["first"]\n');
+		mkdirSync(join(cwd, "stray"));
+		writeFileSync(join(cwd, "stray/main.bal"), "");
+		const message = refusal(cwd, "stray");
+		expect(message).toBe(`${join(cwd, "stray")} already exists: it is a folder that is not one of this project's integrations. Nothing was created or overwritten. Call create_integration with another name, or ask the user to remove or rename what is at that path.`);
+		expect(message).not.toContain("write the code");
+		expect(read(cwd, "Ballerina.toml")).toBe('[workspace]\npackages = ["first"]\n');
 	});
 });
 

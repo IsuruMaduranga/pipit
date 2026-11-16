@@ -17,10 +17,12 @@ The shapes in this skill were checked on `ballerina/workflow` 1.0.3. The module 
 versions (see the version notes below), so after the first build, see which version the integration
 resolved: `grep -A1 '^name = "workflow"' Dependencies.toml` (a new integration gets the latest).
 
-- When it is 1.0.3, write the shapes as shown and do not look them up.
+- When it is 1.0.3, write the shapes as shown: they compile on it.
 - When it is any other version, older or newer, read each call or type you write from that version
   before relying on the shape shown here.
 - Whatever the version, read a call or type this skill does not show before you write it.
+- When the user asks you to check what the module supports, check it with `bal discover` before you
+  write, even for a shape shown here.
 
 Read one symbol from the version the integration resolves with one of:
 

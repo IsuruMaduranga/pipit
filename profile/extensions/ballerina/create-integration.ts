@@ -13,7 +13,7 @@
  * templates to that.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve } from "node:path";
 import type { LspFileChange } from "../../../extensions/sdk/extension.ts";
@@ -207,6 +207,45 @@ function manifestDirAbove(dir: string): string | undefined {
 	}
 }
 
+/** The `.bal` files directly in `dir`, sorted. Throws when the folder cannot be read. */
+function balFiles(dir: string): string[] {
+	return readdirSync(dir)
+		.filter((file) => file.endsWith(".bal"))
+		.sort();
+}
+
+/**
+ * The refusal for a path that exists. A model that lost track of its own
+ * steps calls the tool again after it succeeded, so for an integration the
+ * project lists, the text says it is already there and names both fixes:
+ * write the code in it, or pick another name for a second integration.
+ * Anything else at that path (a file, an empty folder, a folder the project
+ * does not list) is not the integration, so the text says what is there and
+ * never sends the model to write code into it. The listing is best effort;
+ * an unreadable folder leaves it out.
+ */
+function existingPathMessage(path: string, listed: boolean): string {
+	let isFolder = false;
+	let entries: string[] | undefined;
+	try {
+		isFolder = statSync(path).isDirectory();
+		if (isFolder) entries = readdirSync(path);
+	} catch {
+		// Not a listing's job to fail the refusal.
+	}
+	if (listed && isFolder) {
+		const sources = (entries ?? []).filter((file) => file.endsWith(".bal")).sort();
+		const files = sources.length > 0 ? ` (${sources.join(", ")})` : "";
+		return (
+			`The integration ${path} already exists, and nothing is overwritten. ` +
+			`If it is the integration you meant to create, read its .bal files once${files} and write the code in that folder. Do not call create_integration for it again. ` +
+			`If you want a second, different integration, call create_integration with another name.`
+		);
+	}
+	const what = !isFolder ? "a file" : entries?.length === 0 ? "an empty folder, not one of this project's integrations" : "a folder that is not one of this project's integrations";
+	return `${path} already exists: it is ${what}. Nothing was created or overwritten. Call create_integration with another name, or ask the user to remove or rename what is at that path.`;
+}
+
 /**
  * Creates the integration, and the project when the working directory is not
  * inside one. Nothing is overwritten: an existing folder of that name, or a
@@ -240,7 +279,7 @@ export function createIntegration(request: CreateRequest): Created {
 	}
 
 	const integrationDir = join(projectRoot, name);
-	if (existsSync(integrationDir)) throw new CreateError(`${integrationDir} already exists, and nothing is overwritten. Choose another name, or work in the existing integration.`);
+	if (existsSync(integrationDir)) throw new CreateError(existingPathMessage(integrationDir, project?.kind === "workspace" && project.packages.some((pkg) => resolve(pkg.dir) === integrationDir)));
 	if (project?.packages.some((pkg) => pkg.name === name)) throw new CreateError(`The project already has an integration named "${name}". Choose another name.`);
 
 	let nextRootManifest: string;
@@ -279,9 +318,7 @@ export function createIntegration(request: CreateRequest): Created {
 
 /** What the model reads back. */
 export function formatCreated(created: Created): string {
-	const sources = readdirSync(created.integrationDir)
-		.filter((file) => file.endsWith(".bal"))
-		.sort();
+	const sources = balFiles(created.integrationDir);
 	const lines = [
 		created.projectCreated
 			? `Created the BI project at ${created.projectRoot} and its first integration "${created.name}" (org ${created.org}) in ${created.integrationDir}.`

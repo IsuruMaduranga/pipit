@@ -9,13 +9,18 @@ The agent diagram in the BI designer is not generated from a model, it is parsed
 the source you write. Code that compiles but does not match the shapes below still renders as an
 incomplete or empty agent, and the user cannot then edit it in the designer. Follow every rule.
 
-The `ballerina/ai` shapes in this skill are checked against the library: write them as shown and
-do not look them up. That covers the `ai:Agent` declaration and its `run` call, the model provider
-and `ai:getDefaultModelProvider()`, `@ai:AgentTool` functions, human approval, subagents, toolkits,
-data loaders, knowledge bases and the triggers below. Look up only what this skill does not show,
+The `ballerina/ai` shapes in this skill were checked on the installed distribution, so write them
+as shown. They cover the `ai:Agent` declaration and its `run` call, the model provider and
+`ai:getDefaultModelProvider()`, `@ai:AgentTool` functions, human approval, subagents, toolkits,
+data loaders, knowledge bases and the triggers below. For what this skill does not show, look up
 one symbol per command. For example, the fields of the default provider's settings:
 `bal discover type Wso2ProviderConfig -p ballerina/ai --output-format text`. A name you do not know:
 `bal discover search "<keyword>" -p ballerina/ai --output-format text`.
+
+When the user asks you to check what `ballerina/ai` or the installation supports, do it with
+`bal discover` before you write, even for a shape shown here. Its answer starts with the package
+and the version it read. Never read the distribution's folders for this: they can hold a different
+version from the one the build uses.
 
 `<...>` marks a placeholder to substitute from the user's request. Never emit it literally.
 

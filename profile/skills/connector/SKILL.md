@@ -14,9 +14,11 @@ generated types and signatures.
 
 Pick the mode from the request:
 - **client** (the default): the integration *calls* the API.
-- **service**: the user wants to create, build, implement or expose the API the spec describes.
-- **both**: a passthrough or proxy. Generate the service contract and a client, and implement each
-  resource by forwarding to the matching client method; do not hand-write HTTP calls to the backend.
+- **service**: the user wants the integration to *serve* the API the spec describes (to build it,
+  implement it or expose it).
+- **both**: a passthrough or proxy. Generate the service contract and a client. Each resource calls
+  the client method that matches it and returns its result; the backend is never called with
+  hand-written HTTP code.
 
 If no spec was supplied and the API is not on Central (check with `bal search` first), ask the user
 for the spec with `ask_user_question`.
