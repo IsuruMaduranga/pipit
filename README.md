@@ -8,16 +8,18 @@ This first profile is for BI: WSO2 Integrator projects written in Ballerina.
 
 ## How the repository is built
 
-The repository is a copy of a base agent harness plus this product's
-profile:
+Pipit is built on [One Code](https://github.com/IsuruMaduranga/one-code), an
+open-source coding agent harness. The repository is a copy of One Code's base
+plus this product's profile:
 
 | Path | Owner | What it holds |
 |---|---|---|
 | `profile/` | this product | The brand, the model-facing text, the bundled agents, skills and themes, the Ballerina extension and the product's tests |
 | `README.md`, `.github/`, `docs/` | this product | Repository files |
-| everything else | the base | The harness: tools, permissions, the request pipeline, the terminal interface. Never edited here |
+| everything else | One Code's base | The harness: tools, permissions, the request pipeline, the terminal interface. Never edited here: a change to it is made in One Code and brought in with a sync |
 
-`.base-sync.json` records which commit of the base the copy holds.
+`.base-sync.json` records which commit of One Code the copy holds. One Code
+is MIT licensed, and its licence text is this repository's `LICENSE` file.
 
 ## Run it from this tree
 
