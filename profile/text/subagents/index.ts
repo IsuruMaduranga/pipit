@@ -116,7 +116,7 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
                 ...(isolation
                     ? [
                             "",
-                            `You run in a git worktree of your own: your working directory is now ${isolation.worktreePath}, a checkout of the same repository at HEAD. Every path under ${isolation.parentCwd} in the inherited context belongs to the shared checkout, which you must NOT change. Read, edit and run things at the matching path under ${isolation.worktreePath} instead (writes into the shared checkout are refused). Your changes stay on this worktree's branch for the parent to review.`,
+                            `This run has a git worktree to itself. You work in ${isolation.worktreePath}, which holds the repository as of HEAD. The inherited context names paths under ${isolation.parentCwd}: they belong to the main checkout, and you must NOT change anything there (a write into it is refused). Do your reading, editing and running at the same relative path under ${isolation.worktreePath}. Whatever you change stays on this worktree's branch, where the parent reviews it.`,
                         ]
                     : []),
                 "",

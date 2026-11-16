@@ -46,5 +46,5 @@ export const classifier: ClassifierText = {
 		"The user made that choice ahead of time for a whole CLASS of actions, and nothing the user says in the conversation lifts it. " +
 		"BLOCK the action under review when its effect is what the rule forbids, no matter which command, interpreter, script or tool carries it out.",
 	resolvedPathsNote:
-		"Measured by the harness, not written by the agent: each path below is named by the action under review as if inside the working directory, but resolves through a symbolic link to resolvesTo, outside every working directory. Judge the action as reading or writing resolvesTo.",
+		"The harness measured these paths; the agent did not write this note. The action under review names each path as if it sat inside the working directory, yet a symbolic link takes it to resolvesTo, which lies outside every working directory. Treat the action as reading or writing resolvesTo itself.",
 };

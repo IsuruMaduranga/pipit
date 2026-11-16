@@ -28,7 +28,7 @@ const TOOL_SETS: (readonly string[] | undefined)[] = [undefined, ["bash"], ["pow
 const OTHER_PRODUCT = /claude|one ?code|anthropic|\bCLAUDE(\.local)?\.md\b/i;
 
 /** Phrases where a tool's name is an English word, not the tool. */
-const ENGLISH: EnglishPhrases = { edit: [/Read, edit and run things/] };
+const ENGLISH: EnglishPhrases = {};
 
 /** A session with this tool set, as pi reports it for `live`: the task tools only when they are on. */
 const sessionFor = (live: LiveTools, tier: PromptTier, tools: readonly string[] | undefined) => ({ tier, taskTools: live.has("task_create"), tools: tools?.filter((tool) => live.has(tool)) });
