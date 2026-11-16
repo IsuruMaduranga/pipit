@@ -9,10 +9,13 @@ The agent diagram in the BI designer is not generated from a model, it is parsed
 the source you write. Code that compiles but does not match the shapes below still renders as an
 incomplete or empty agent, and the user cannot then edit it in the designer. Follow every rule.
 
-Read `ballerina/ai` signatures from Central rather than from memory, for example
-`bal discover method run -p ballerina/ai --class Agent`, `bal discover type AgentConfiguration -p
-ballerina/ai`, or `bal discover search "<keywords>" -p ballerina/ai`. Without a version,
-`bal discover` reads the version the integration's `Dependencies.toml` locks, else the latest.
+The `ballerina/ai` shapes in this skill are checked against the library: write them as shown and
+do not look them up. That covers the `ai:Agent` declaration and its `run` call, the model provider
+and `ai:getDefaultModelProvider()`, `@ai:AgentTool` functions, human approval, subagents, toolkits,
+data loaders, knowledge bases and the triggers below. Look up only what this skill does not show,
+one symbol per command. For example, the fields of the default provider's settings:
+`bal discover type Wso2ProviderConfig -p ballerina/ai --output-format text`. A name you do not know:
+`bal discover search "<keyword>" -p ballerina/ai --output-format text`.
 
 `<...>` marks a placeholder to substitute from the user's request. Never emit it literally.
 
@@ -254,8 +257,9 @@ final <Toolkit> <toolkitVar> = check new ("<serverUrl>",
 That last form is `http:OAuth2ClientCredentialsGrantConfig` (client ID / client secret grant).
 `tokenUrl`, `clientId` and `clientSecret` are the only fields shown here; it also has `scopes`,
 `defaultTokenExpTime`, `clockSkew`, `optionalParams`, `credentialBearer` and `clientConfig` for
-further tuning; read their defaults with `bal discover type OAuth2ClientCredentialsGrantConfig -p
-ballerina/http` before adding one rather than assuming it is required.
+further tuning. Add one only when the user's setup needs it, and read its default first rather
+than assuming it is required:
+`bal discover type OAuth2ClientCredentialsGrantConfig -p ballerina/http --output-format text`.
 
 `auth` is only one of many fields on `config`, build it as its own value to combine several at
 once (`timeout`, `httpVersion`, and the rest of the transport settings), then spread it into the

@@ -13,11 +13,20 @@ The workflow diagram in the BI designer, like the agent diagram, is parsed direc
 source you write, not generated from a model. Code that compiles but does not match the shapes
 below still renders as a broken or incomplete node. Follow every rule.
 
-`ballerina/workflow` changes between versions (see the version notes below). Before writing a call
-whose shape you are not sure of, read it from the version the integration resolves:
-`bal discover function <name> -p ballerina/workflow`, `bal discover type <Name> -p ballerina/workflow`,
-or `bal discover method <name> -p ballerina/workflow --client Context` (without a version,
-`bal discover` reads the one `Dependencies.toml` locks, else the latest).
+The shapes in this skill were checked on `ballerina/workflow` 1.0.3. The module changes between
+versions (see the version notes below), so after the first build, see which version the integration
+resolved: `grep -A1 '^name = "workflow"' Dependencies.toml` (a new integration gets the latest).
+
+- When it is 1.0.3, write the shapes as shown and do not look them up.
+- When it is any other version, older or newer, read each call or type you write from that version
+  before relying on the shape shown here.
+- Whatever the version, read a call or type this skill does not show before you write it.
+
+Read one symbol from the version the integration resolves with one of:
+
+- `bal discover function <name> -p ballerina/workflow --output-format text`
+- `bal discover type <Name> -p ballerina/workflow --output-format text`
+- `bal discover method <name> -p ballerina/workflow --client Context --output-format text`
 
 `<...>` marks a placeholder to substitute from the user's request. Never emit it literally.
 
@@ -197,8 +206,9 @@ value (positional params sit between them and the activity reference):
 - `NoRetry`: the default when `retryPolicy` is omitted. The error from the activity is returned
   directly to the caller.
 
-Older versions named these differently (`HumanReview`, `NoAutomaticRetry`). Read the record before
-writing a literal for it: `bal discover type RetryBeforeReview -p ballerina/workflow`.
+Older versions named these differently (`HumanReview`, `NoAutomaticRetry`). When the integration
+resolves a version other than 1.0.3, read the record before writing a literal for it:
+`bal discover type RetryBeforeReview -p ballerina/workflow --output-format text`.
 
 `approvalPolicy` (a `ReviewTaskDefinition`, or the default `NoApproval`) gates the call behind a
 human review before it runs.
@@ -271,9 +281,9 @@ check workflow:sendData(<name>Workflow, workflowId, "<fieldName>", <data>);
 The order is `(workflow, workflowId, dataName, data)` (checked on 1.0.3: `sendData(function ()
 workflow, string workflowId, string dataName, anydata data) returns error?`), `dataName` before
 `data`, and `dataName` matching the events record field name exactly. **Older `ballerina/workflow`
-versions swapped `data` and `dataName`.** When the integration locks an older version, confirm the
-signature with `bal discover function sendData -p ballerina/workflow` (it reads the locked version)
-rather than trusting either order from memory.
+versions swapped `data` and `dataName`.** When the integration resolves a version other than 1.0.3,
+confirm the signature with `bal discover function sendData -p ballerina/workflow --output-format text` (it
+reads the locked version) rather than trusting either order from memory.
 
 ## Human tasks
 
@@ -404,8 +414,9 @@ registration for them at module init.
 **This section describes `ballerina/workflow` 0.10.0 and later** (its config record matches
 1.0.3). 0.10.0 reshaped the declaration surface: several 0.9.x fields were removed, and the
 compiler plugin rejects them outright rather than ignoring them (`WORKFLOW_163`). Check the
-resolved version before writing a declaration (`bal discover type DurableAgentConfig -p
-ballerina/workflow`), the same way you would for `sendData` or `awaitHumanTask` above.
+locked version in `Dependencies.toml` before writing a declaration, the same way as for `sendData`
+above. Only when it is older than 0.10.0, read the record that version has:
+`bal discover type DurableAgentConfig -p ballerina/workflow --output-format text`.
 
 ```ballerina
 final workflow:DurableAgent <agentName> = check new ({

@@ -14,7 +14,7 @@ Interpret the request above with whichever of these patterns fits:
 - A single function name with no other text: function mode; fill in the existing function with the mapping.
 - Empty: take the mapping from the user's latest message and the file they are working on; if neither names the input and output types, ask.
 
-Read the input and output types before writing anything: find them with `grep` in the integration (usually `types.bal`), and read a library's record with `bal discover type <Name> -p <org>/<name>`.
+Read the input and output types before writing anything: find them with `grep` in the integration (usually `types.bal`). For a library's record whose fields are not already in the conversation, read it with `bal discover type <Name> -p <org>/<name> --output-format text`, once.
 
 ### Priority
 When generating mapping expressions, follow this order strictly:

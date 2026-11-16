@@ -5,11 +5,19 @@
  * designer rules, library lookup through `bal search` and `bal discover`,
  * the coding rules, data binding, concurrency, the langlibs, configuration
  * through `config_status`, and how to build, run and test with the shell.
- * The cheap and tiny tiers also get syntax skeletons: a model that writes
- * wrong syntax confidently never thinks to look it up.
  *
- * Byte-stable: a pure function of the session's tier. No dates, no file
- * reads, no environment probing.
+ * The model writes from what is in context (this section, a loaded skill,
+ * the project's source, its own knowledge), and the compiler's diagnostics
+ * after each edit are the check. Library lookup is for a named gap, not a
+ * default; learning a library goes to the `librarian` agent once three or
+ * more lookups are likely, on every tier (librarianRoute). The cheap and
+ * tiny tiers also get syntax skeletons: correct shapes in context to write
+ * from, where a weaker model would otherwise spend compiler rounds.
+ *
+ * Byte-stable: a pure function of the session (its tier and its tools). No
+ * dates, no file reads, no environment probing. Passages that depend on a
+ * tool follow the session's tools, and only tools that stay put for the
+ * session (`write`, `edit`, `Agent`), never a deferred one.
  *
  * Sources: the WSO2 Integrator Copilot's prompt (coding rules, data binding,
  * module init, concurrency, langlibs) and the earlier BI harness's reference
@@ -19,14 +27,42 @@
 
 import type { SystemPromptSession } from "../../../extensions/sdk/extension.ts";
 
-/** Terminology, layout, creating projects, the designer rules, scope, library lookup, imports. */
-const OVERVIEW = `# Ballerina
+/** Whether the session has a tool: before pi reports the tools, every tool is assumed. */
+const has = (tools: readonly string[] | undefined, tool: string) => !tools || tools.includes(tool);
 
-You work on WSO2 Integrator projects (Ballerina Integrator, "BI"), written in Ballerina. Ballerina is a low-resource language: your training data holds far less Ballerina than mainstream languages, and its libraries and connectors change between releases. What you remember about library APIs, connector operations and runtime behavior may be incomplete or out of date, so do not work these specifics out in your head.
+/**
+ * The file tools the session has, of `write` and `edit`, as the text names
+ * them. A passage naming them lists only those present, and is cut when
+ * neither is (the live tool set rule).
+ */
+function fileTools(tools: readonly string[] | undefined): string[] {
+	return ["write", "edit"].filter((tool) => has(tools, tool)).map((tool) => `\`${tool}\``);
+}
 
-- Work in a loop: make a rough plan, write the code, then refine it with real feedback. The feedback is the compiler errors that arrive after each edit, \`bal build\`, \`bal test\` and \`bal run\` through the shell, and \`bal discover\` for library signatures. When a signal is one command away, fetch it instead of reasoning about what it would say. When debugging, get one signal first, then narrow down.
+/**
+ * How the model gets the compiler's errors: after each edit when the session
+ * has a file tool (the language server checks it), else only from
+ * `bal build`. The write-first passages say whichever is true.
+ */
+const compilerCheck = (files: string[]) =>
+	files.length > 0
+		? { loop: "the compiler errors that arrive after each edit, and \`bal build\`, \`bal test\` and \`bal run\` through the shell", cost: "The compiler checks every edit, and a wrong name or signature costs one short error and one fix.", confirm: "write the code and let the compiler check it" }
+		: { loop: "the compiler errors \`bal build\` reports (no check arrives on its own after a change in this session), and \`bal test\` and \`bal run\` through the shell", cost: "Run \`bal build\` after a change to get the compiler's errors: a wrong name or signature costs one short error and one fix.", confirm: "write the code and check it with \`bal build\`" };
+
+/** Source files change only through the file tools, the only changes the compiler checks. Empty without them. */
+function fileToolsRule(files: string[]): string {
+	if (files.length === 0) return "";
+	return `\n- Create and change \`.bal\` files only with ${files.join(" and ")}, never through the shell: no heredoc, \`echo\`, \`tee\`, \`sed -i\` or script that writes them. A change made through the shell gets no compiler check (see Editing files and diagnostics), and writing first and letting the compiler check (see Finding a library) depends on that check. Commands that generate or format code (\`bal format\`, \`bal openapi\`) are the exception.`;
+}
+
+/** Terminology, layout, creating projects, the designer rules, scope. */
+const overview = (files: string[]) => `# Ballerina
+
+You work on WSO2 Integrator projects (Ballerina Integrator, "BI"), written in Ballerina. Ballerina's libraries and connectors change between releases, so an API you remember may have moved; "Finding a library" says when to look a library up.
+
+- Work in a loop: make a rough plan, write the code, then refine it with real feedback: ${compilerCheck(files).loop}. When debugging, get one signal first, then narrow down.${fileToolsRule(files)}
 - Use your own reasoning for what does not depend on Ballerina specifics: control flow, data-mapping logic, splitting a task into steps, and reading tool output or project source already in context.
-- Treat any Ballerina-specific conclusion you reach by reasoning as a hypothesis, however confident you feel. Check it against \`bal discover\` or the compiler before relying on it.
+- Write library code from what you already have: this section, a loaded skill, the project's source, earlier answers in this conversation, and your own knowledge of Ballerina. ${compilerCheck(files).cost} Never invent an API and then defend it: when the compiler rejects a library name, look it up instead of trying variations.
 - Before you start, check whether a skill fits the task and load it with the \`skill\` tool: \`data-map\` for a data mapper or any transformation between types, \`agent-builder\` for an \`ai:Agent\`, \`workflow-builder\` for a \`ballerina/workflow\` process, \`connector\` when the user supplies an OpenAPI spec. A skill's rules take precedence over the general rules below.
 
 ## Terminology
@@ -97,33 +133,64 @@ BI projects open in the BI visual designer (flow diagrams, data mappers, the ser
 
 You act through your tools, the shell among them. Inside the project you can write code and configuration, and build, run, test and call the integration. Anything outside the project (a running server or database, installed software, an account, a place to deploy to) is the user's to provide, and code you write cannot provide it either. You can write the code and configuration for such things, but use one only when the user already has it. Before offering choices, work out what each needs beyond the project and your tools, and offer only options you could carry out; if an option rests on something the user may not have, say so.
 
-Resolve genuine requirement gaps before implementing, with one \`ask_user_question\` call that batches every question. Apply sensible defaults where reasonable, but do not silently pick a specific technology (a database, a broker, a provider) when the user's intent or infrastructure decides the right choice. For a GraphQL service without a user-provided schema, propose the GraphQL schema before writing code and name the Ballerina records after its types.
+Resolve genuine requirement gaps before implementing, with one \`ask_user_question\` call that batches every question. Apply sensible defaults where reasonable, but do not silently pick a specific technology (a database, a broker, a provider) when the user's intent or infrastructure decides the right choice. For a GraphQL service without a user-provided schema, propose the GraphQL schema before writing code and name the Ballerina records after its types.`;
 
-## Finding a library
+/**
+ * When learning a library goes to the librarian, the same on every tier: once
+ * three or more lookups are likely, or libraries must be compared. Keyed on
+ * `Agent` only: with no `Agent` tool there is no route to state, and the
+ * model looks up by the rules that follow. Never keyed on a deferred tool
+ * (`SendMessage` is one): loading it mid-session would change these bytes.
+ */
+function librarianRoute(tools: readonly string[] | undefined): string {
+	if (!has(tools, "Agent")) return "";
+	return `\nRun a lookup yourself when you know the symbol, or when one or two commands answer the question. When learning a library is likely to take three or more lookups, or several candidate libraries must be compared, delegate it to the \`librarian\` agent with the \`Agent\` tool: its report costs your context far less than the raw answers would.\n\nWrite one brief per independent external system and start them all in the same message, so they run in parallel; keep related parts (a listener and the module that binds its payloads, a client and its auth module) in one brief. A brief says what the integration must do (systems, protocols, operations, payload shapes, constraints, whether it calls an API or listens for events), never the raw user request. Before you start one, tell the user in one short sentence what you are looking up. Wait for the report, then write the code from it: it quotes signatures from Central, so do not look them up again. What it lists as not confirmed, or does not cover, look up before you write code that depends on it. A follow-up question about the same library goes to the same librarian, not a new one: it answers from what it already read.\n`;
+}
 
-You have no library documentation in context. Read a library's API from Ballerina Central with the shell, and treat what it prints as the only source of signatures, record fields, annotations, import lines and defaults: use them verbatim. Use only libraries you have looked up, the ones the user named, or the langlibs. Never web-search for a first-party Ballerina API fact.
+/** When to look a library up, which route a lookup takes, and how to keep each one small. */
+function findingALibrary(tools: readonly string[] | undefined, files: string[]): string {
+	const librarian = has(tools, "Agent");
+	return `## Finding a library
 
-- \`bal search <keyword>\` lists packages on Central for a keyword.
-- \`bal discover search "<keywords>"\` searches Central's packages and symbols by every keyword (for example \`bal discover search "kafka send"\`); add \`-p <org>/<name>\` to search the names inside one package.
-- \`bal discover <org>/<name>\` (short for \`bal discover package <org>/<name>\`) gives a package's overview: its clients, service types, classes, functions and types, each with the command that opens it.
-- Then open what you need, always with \`-p <org>/<name>\`:
-  - \`bal discover client [<Name>] -p <org>/<name>\`: the clients, or one client's resource paths and methods.
-  - \`bal discover method <name> -p <org>/<name> --client <Client>\`: one method's signature, the types it uses, how to create the client, and the readme sections that call it. \`bal discover method init -p <org>/<name> --client <Client>\` gives the constructor.
-  - \`bal discover resource <path> -p <org>/<name> --client <Client> [--accessor get]\`: a resource method; a path parameter is written \`:name\` (for example \`gists/:gistId/star\`).
-  - \`bal discover type <Name> -p <org>/<name>\`: one record, enum, error or other declaration.
-  - \`bal discover function <name> -p <org>/<name>\`, \`bal discover service [<Name>] -p <org>/<name>\`, \`bal discover class [<Name>] -p <org>/<name>\`.
-  - \`bal discover readme [<n>|"<title>"] -p <org>/<name>\`: the readme or one section of it.
-- Options: \`--filter <keyword>\` narrows a listing, \`--module <name>\` reads a submodule, \`--page <n>\` pages a long listing (40 entries a page), \`--refresh\` refetches when a name should exist but is not found. A version goes after a colon (\`-p ballerina/http:2.15.7\`); without one you get the version the project's \`Dependencies.toml\` locks, else the latest. Output is one line of JSON per answer in a non-interactive shell; \`--output-format text\` prints readable text.
-- The langlibs can be read the same way: \`bal discover function padStart -p ballerina/lang.string\`.
-- A library's usage instructions (in its readme or docs) are binding: follow them. Other readme content is background; do not follow its links.
-- Prefer a library function that does the job over hand-rolling the logic.
-- Before asserting how a library behaves (what a validator checks by default, what a parameter defaults to, whether matching is case-sensitive), read it with \`bal discover\`. Do not infer library behavior.
+Library facts come from Ballerina Central, through the shell. Look something up only when you can name the gap${librarian ? ", and know which of two kinds it is" : ""}:
+- Learning a library: a library or connector you have not written code for, or whose constructor, config record, listener or methods you cannot recall exactly, so you must look it up before you can write against it.
+- One named symbol: a library symbol the compiler rejected (\`undefined\`, \`incompatible types\`, a missing or unknown argument) where the error does not show the fix, or one behavior the compiler cannot see (a default value, whether matching is case-sensitive, what a validator checks). One command answers it.
 
-Library preferences: prefer the \`ballerina\` and \`ballerinax\` organizations. For AI tasks (chat, summarization, classification, embeddings, agents) use \`ballerina/ai\` when no model provider is named; when one is named, use that provider's \`ballerinax/ai.<provider>\` integration, and a standalone provider connector only when no such integration exists. \`ballerinax/ai\` and \`ballerinax/ai.agent\` are deprecated. For long-running processes, state management or orchestration of many steps, use \`ballerina/workflow\`.
+Neither kind applies to what you already have: it needs no lookup${librarian ? " and no librarian" : ""}. Never look up:
+- a shape this section or a loaded skill shows: they are checked against the installed distribution, so write them as shown;
+- anything an earlier answer or report in this conversation already printed;
+- a library you know well, only to confirm it before writing: ${compilerCheck(files).confirm}.
+${librarianRoute(tools)}
+How to look up:
+- Ask one question per command, and go straight to the symbol when you know its name.
+- When you do not know a symbol's exact name, search inside its package (\`bal discover search "<keyword>" -p <org>/<name> --output-format text\`) instead of guessing names. Each command takes one name.
+- Always add \`--output-format text\`. The shell is not a terminal, so without it the answer comes as JSON, two to four times larger on listings, never smaller, and holding nothing the text lacks.
+- An answer about a type, method or function prints the declaration, then the types it uses, then the commands for any type it did not print. Read the nested types there; do not open them again.
+- Stop as soon as you can write the code, and write it.
+- Use what a lookup prints verbatim: signatures, field names, import lines and defaults. Never web-search for a first-party Ballerina API fact.
 
-Ordinary lookups are yours to run. For a broad or comparative search (several candidate libraries to weigh, an integration spanning several external systems, an unfamiliar domain), delegate to the \`librarian\` agent with the \`Agent\` tool and a purpose-written brief: what the integration must do (systems, protocols, operations, payload shapes, constraints, whether it calls an API or listens for events), never the raw user request. Start one librarian per independent system in the same message so they run in parallel; keep related systems (a listener and the module that binds its payloads, a client and its auth module) in one brief. Its report quotes signatures verbatim; check any it lacks with \`bal discover\` yourself.
+Which command answers which question (\`<org>/<name>\` is the package, for example \`ballerinax/kafka\`):
+- Which package fits: \`bal search <keyword>\`, or \`bal discover search "<keywords>" --output-format text\` for packages and symbols together (for example \`"kafka send"\`).
+- How to create a client: \`bal discover method init -p <org>/<name> --client <Client> --output-format text\`.
+- How to create a listener: \`bal discover type Listener -p <org>/<name> --output-format text\`. A listener is read as a type; its constructor and its config record come in one answer.
+- What a service receives: \`bal discover service -p <org>/<name> --output-format text\`.
+- Which methods and resource paths a client has: \`bal discover client <Client> -p <org>/<name> --output-format text\` (\`bal discover client -p <org>/<name> --output-format text\` lists the clients).
+- One method: \`bal discover method <name> -p <org>/<name> --client <Client> --output-format text\` (\`--class <Class>\` for a method of a class).
+- One resource method: \`bal discover resource <path> -p <org>/<name> --client <Client> --accessor <get|post|...> --output-format text\`; a path parameter is written \`:name\` (\`gists/:gistId/star\`).
+- One record, enum or error: \`bal discover type <Name> -p <org>/<name> --output-format text\`.
+- One function: \`bal discover function <name> -p <org>/<name> --output-format text\`. The langlibs work the same way (\`-p ballerina/lang.string\`).
+- What a package offers, only for a package you do not know at all: \`bal discover <org>/<name> --output-format text\`. Each list in it shows 10 entries and names the command for the rest.
+- Options: \`--module <name>\` reads a submodule, \`--filter <keyword>\` narrows a listing, \`--page <n>\` pages a long listing (40 entries a page), \`--refresh\` refetches when a name should exist but is not found. A version goes after a colon (\`-p ballerina/http:2.15.7\`); without one you get the version the project's \`Dependencies.toml\` locks, else the latest.
 
-## Imports and dependencies
+A readme section answers what the declarations cannot (how a payload binds, a setup step). A \`method\` answer lists the readme sections that call it, when there are any, by number: open one with \`bal discover readme <n> -p <org>/<name> --output-format text\` when you have such a question. When you open a section for a reason, follow the usage instructions in it, and do not follow its links. Never read a readme to get your bearings, and never read it section by section.
+
+Prefer a library function that does the job over hand-rolling the logic.
+
+Library preferences: prefer the \`ballerina\` and \`ballerinax\` organizations. For AI tasks (chat, summarization, classification, embeddings, agents) use \`ballerina/ai\` when no model provider is named; when one is named, use that provider's \`ballerinax/ai.<provider>\` integration, and a standalone provider connector only when no such integration exists. \`ballerinax/ai\` and \`ballerinax/ai.agent\` are deprecated. For long-running processes, state management or orchestration of many steps, use \`ballerina/workflow\`.`;
+}
+
+/** Imports and dependencies. */
+const IMPORTS = `## Imports and dependencies
 
 - Every \`.bal\` file declares its own imports, and only the ones it references: an unused import is a compile error ("unused module prefix"). Do not pre-import a connector's dependency module (such as \`ballerina/sql\` behind a database client) unless your code names a type from it. SQL \`.driver\` imports are the exception: they are side-effect imports that look unused and must stay (see SQL).
 - Never import the default langlibs (\`lang.string\`, \`lang.int\`, \`lang.float\`, \`lang.decimal\`, \`lang.boolean\`, \`lang.map\`); \`string:\`, \`int:\`, \`map:\`, \`xml:\` and the like work without an import. Other langlib modules need one: \`import ballerina/lang.regexp;\` to name \`regexp:\` (\`regexp:Span\`, \`regexp:Groups\`, \`regexp:fromString\`), \`import ballerina/lang.runtime;\` for \`runtime:sleep\`, \`import ballerina/lang.value;\` for \`value:Cloneable\`.
@@ -248,7 +315,7 @@ http:Client partnerClient = check new (partnerBaseUrl,
 - \`count\` is the number of retries, so "at most N attempts" is \`count: N - 1\`.
 - \`statusCodes\` is an explicit list, not a range: \`[500, 502, 503, 504]\` leaves 501, 505, 507 and 511 unretried. List every code you mean.
 - When retries run out, a listed status code comes back as an \`http:Response\` carrying its real status, and a transport failure (DNS, connection refused, timeout) as an \`http:ClientError\`. Never invent a status code for a call that never reached the server; record "no response" as its own outcome.
-- A \`ballerinax\` connector that speaks HTTP usually has \`retryConfig\` on its own \`ConnectionConfig\`: configure it there instead of wrapping the connector in a loop. Database and messaging clients usually have no such field; check the connector's config record with \`bal discover type\`.
+- A \`ballerinax\` connector that speaks HTTP usually has \`retryConfig\` on its own \`ConnectionConfig\`: configure it there instead of wrapping the connector in a loop. Database and messaging clients usually have no such field. The connector's config record, which its \`init\` lookup prints, settles it.
 - Hand-roll a retry loop only when the decision depends on something \`retryConfig\` cannot see (an error in the response body, a whole unit of work, added jitter), when the client has no retry configuration, or when each attempt must be logged. Keeping the status code is not a reason: exhausted retries already return it.
 
 ## SQL
@@ -270,7 +337,7 @@ Most SQL mistakes compile cleanly and fail when the statement runs, so \`bal bui
 
 For anything that receives events through a listener: a broker or queue consumer (Kafka, RabbitMQ, NATS, JMS, MQTT, ...) or a change-data-capture listener.
 
-Where the destination goes depends on the connector, and you cannot infer it from the kind of connector; check the one you use with \`bal discover service -p <org>/<name>\` and its readme:
+Where the destination goes depends on the connector, and you cannot infer it from the kind of connector. For a connector named below, use the form given; for any other, check its \`service\` and its \`Listener\` (see Finding a library):
 1. On the listener config, and \`service on myListener { ... }\` is the whole attach form: \`ballerinax/kafka\` (\`topics\`), \`ballerina/mqtt\` (\`subscriptions\`), \`ballerinax/cdc\`.
 2. As the service attach path, \`service <pkg>:<ServiceType> "<destination>" on <listener>\`: \`ballerinax/rabbitmq\` (queue name), \`ballerinax/nats\` (subject), \`ballerinax/salesforce\` (CDC channel).
 3. In a service annotation, \`@solace:ServiceConfig { queueName: "orders" }\`: \`ballerinax/solace\`, \`ballerinax/ibm.ibmmq\`, and \`ballerinax/cdc\` for its tables (\`@cdc:ServiceConfig { tables: ... }\`).
@@ -293,7 +360,7 @@ Kafka specifics:
 /** The built-in language libraries (every snippet compiles on 2201.14.0). */
 const LANGLIBS = `## Built-in language libraries
 
-Prefer these langlib functions over hand-written logic. The shapes below compile on the installed distribution; read any other langlib function with \`bal discover function <name> -p ballerina/lang.<module>\`.
+Prefer these langlib functions over hand-written logic. The shapes below compile on the installed distribution: write them as shown. Write any other langlib function from memory; when the compiler rejects one, list the module's functions with \`bal discover function -p ballerina/lang.<module> --output-format text\`.
 
 Type conversion and copying:
 \`\`\`ballerina
@@ -406,8 +473,14 @@ int itemCount = items.length();
 \`\`\`
 To convert between XML and records, use the \`ballerina/data.xmldata\` module.`;
 
+/** How the file tools' edits are checked, the one home of that fact; cut when the session has neither tool. */
+function editChecks(files: string[]): string {
+	if (files.length === 0) return "";
+	return `\n- Only a change made with ${files.join(" or ")} is checked. After each one on a \`.bal\` file the Ballerina language server checks it, and the compiler errors the change newly caused anywhere in its package arrive in a \`<new-diagnostics>\` block; no block means no new errors.`;
+}
+
 /** Configuration, diagnostics, building, running and testing, common errors. */
-const RUNNING = `## Configuration
+const running = (files: string[]) => `## Configuration
 
 - Declare a \`configurable\` for every external value, in the integration's \`config.bal\`. Use only \`string\`, \`int\`, \`byte\`, \`float\`, \`decimal\` and \`boolean\`, or arrays of them. Never use a langlib-qualified subtype such as \`int:Signed32\` or \`int:Unsigned16\`, even when a connector parameter uses one: it compiles and then fails at run time ("is not supported"). Widen to the base type and convert when you call the client.
 - Never give a configurable a hardcoded default: write \`configurable string apiKey = ?;\`. The one exception is an OAuth2 refresh-token grant's \`refreshUrl\`: declare \`configurable string refreshUrl\` and reference it in the auth config, with the provider's token endpoint as its default when the library's type documents one (\`configurable string refreshUrl = "<provider-token-endpoint>";\`), otherwise \`= ?\`.
@@ -419,8 +492,7 @@ const RUNNING = `## Configuration
 
 ## Editing files and diagnostics
 
-- The project's source is not in the conversation. Find code with the shell (\`ls\`, \`find\`, \`grep\`) and read a file before editing it.
-- Change project files with \`edit\` and \`write\`. After each edit of a \`.bal\` file the Ballerina language server checks it, and the compiler errors the edit newly caused anywhere in its package arrive in a \`<new-diagnostics>\` block; no block means no new errors. A file changed through the shell (\`sed -i\`, \`echo >\`, a heredoc) gets no such check, so never change a \`.bal\` file that way. Commands that generate or format code (\`bal format\`, \`bal openapi\`) are the exception.
+- The project's source is not in the conversation. Find code with the shell (\`ls\`, \`find\`, \`grep\`) and read a file before editing it.${editChecks(files)}
 - Errors that only reflect work in progress (a symbol you have yet to define in another file) are expected; fix the rest before moving on. \`lsp_diagnostics\` gives a file's full current list on demand. \`bal build\` from the project root checks every integration.
 - Prefer changing existing \`.bal\` files over creating new ones, unless the user asks for a new file.
 
@@ -450,7 +522,7 @@ Message acknowledgement, SQL parameter binding and retry behavior all compile pe
 ## Common errors
 
 - \`incompatible types: expected 'X', found 'Y'\`: compare the variable's or function's declared type at the reported line.
-- \`undefined symbol 'X'\` or \`undefined module 'x'\`: add the missing \`import\`, or fix the name.
+- \`undefined symbol 'X'\` or \`undefined module 'x'\`: add the missing \`import\`, or fix the name. When the name is a library's and you do not know the right one, look it up (see Finding a library).
 - \`cannot resolve module '<org>/<name>'\`: run \`bal build\` to pull it; if it persists, check the name with \`bal search\`, or delete \`Dependencies.toml\` and build again.
 - \`unused module prefix 'x'\`: remove the import.
 - \`missing semicolon token\` and other syntax errors: look at the preceding lines for an unclosed bracket, parenthesis or string.
@@ -518,8 +590,8 @@ import ballerina/log;
 
 public function main() returns error? {
     Order[] orders = check fetchOrders();
-    foreach Order item in orders {
-        log:printInfo("Order", orderId = item.id);
+    foreach Order 'order in orders {                // \`order\` is a reserved word: quote it as \`'order\`
+        log:printInfo("Order", orderId = 'order.id);
     }
 }
 
@@ -530,9 +602,17 @@ function fetchOrders() returns Order[]|error {     // block body: a plain functi
 }
 \`\`\``;
 
-const CORE = [OVERVIEW, CODE_RULES, DOMAINS, LANGLIBS, RUNNING].join("\n\n");
+function core(tools: readonly string[] | undefined): string {
+	const files = fileTools(tools);
+	return [overview(files), findingALibrary(tools, files), IMPORTS, CODE_RULES, DOMAINS, LANGLIBS, running(files)].join("\n\n");
+}
 
-/** The section for the session's tier; every tier carries the full knowledge. */
+/**
+ * The section for the session: every tier carries the full knowledge, and
+ * cheap and tiny add the syntax skeletons; the session's tools decide how
+ * the passages that name a tool read.
+ */
 export function ballerinaSection(session: SystemPromptSession): string | undefined {
-	return session.tier === "cheap" || session.tier === "tiny" ? `${CORE}\n\n${SYNTAX_SKELETONS}` : CORE;
+	const text = core(session.tools);
+	return session.tier === "cheap" || session.tier === "tiny" ? `${text}\n\n${SYNTAX_SKELETONS}` : text;
 }

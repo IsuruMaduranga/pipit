@@ -6,17 +6,19 @@
  * product does not have (the earlier BI harness's and the VS Code Copilot's
  * tools are gone; library lookup is the shell).
  */
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { PromptTier } from "../../extensions/lib/models/model-tier.ts";
+import { parseFrontmatterLoosely } from "../../extensions/lib/core/frontmatter.ts";
 import { ballerinaSection } from "../extensions/ballerina/prompt.ts";
 
 const PROFILE = join(import.meta.dirname, "..");
 const TIERS: PromptTier[] = ["frontier", "workhorse", "cheap", "tiny"];
 const SKILLS = ["data-map", "agent-builder", "workflow-builder", "skill-creator", "connector"];
 const AGENTS = ["librarian"];
+const BUNDLED_AGENTS = ["explore", "general-purpose", "plan", "librarian"];
 
 const render = (tier: PromptTier, tools?: readonly string[]) => ballerinaSection({ tier, taskTools: true, tools });
 
@@ -63,8 +65,35 @@ describe("the # Ballerina section", () => {
 			const first = render(tier);
 			expect(first).toBeDefined();
 			expect(render(tier)).toBe(first);
-			expect(render(tier, ["read", "bash", "config_status"])).toBe(first);
-			expect(ballerinaSection({ tier, taskTools: false, tools: ["read"] })).toBe(first);
+			// Before pi reports the tools, every tool is assumed.
+			expect(render(tier, ["read", "bash", "edit", "write", "Agent", "config_status"])).toBe(first);
+			expect(ballerinaSection({ tier, taskTools: false, tools: ["read", "write", "edit", "Agent"] })).toBe(first);
+			// A deferred tool loaded mid-session (SendMessage, lsp_diagnostics, task_output) changes nothing.
+			expect(render(tier, ["read", "bash", "edit", "write", "Agent", "SendMessage", "lsp_diagnostics", "task_output"])).toBe(first);
+		}
+	});
+
+	it("changes source files only through the file tools, naming only the file tools the session has", () => {
+		const text = render("frontier") ?? "";
+		expect(text).toContain("- Create and change `.bal` files only with `write` and `edit`, never through the shell");
+		expect(text).toContain("A change made through the shell gets no compiler check");
+		expect(text).toContain("- Only a change made with `write` or `edit` is checked.");
+		// The rule sits before the first edit is described, near the top.
+		expect(text.indexOf("Create and change `.bal` files only with")).toBeLessThan(text.indexOf("## Terminology"));
+		expect(render("frontier", ["bash", "write"])).toContain("only with `write`, never");
+		expect(render("frontier", ["bash", "write"])).toContain("Only a change made with `write` is checked");
+		expect(render("frontier", ["bash", "edit"])).toContain("only with `edit`, never");
+		for (const tier of TIERS) {
+			const without = render(tier, ["read", "bash"]) ?? "";
+			expect(toolReference("edit").test(without), `the ${tier} section names edit without it`).toBe(false);
+			expect(toolReference("write").test(without), `the ${tier} section names write without it`).toBe(false);
+			expect(without).not.toContain("Create and change `.bal` files only with");
+			// No automatic check arrives without a file tool: the text says to build instead.
+			expect(without).not.toContain("arrive after each edit");
+			expect(without).not.toContain("The compiler checks every edit");
+			expect(without).not.toContain("let the compiler check it");
+			expect(without).toContain("Run `bal build` after a change to get the compiler's errors");
+			expect(without).toContain("write the code and check it with `bal build`");
 		}
 	});
 
@@ -78,14 +107,64 @@ describe("the # Ballerina section", () => {
 
 	it("carries the full domain knowledge on every tier, and skeletons on the weaker ones", () => {
 		const frontier = render("frontier") ?? "";
-		for (const heading of ["## Terminology", "## Creating a project or an integration", "## Keeping code editable in the BI designer", "## Finding a library", "## Coding rules", "## Data binding, type casts and narrowing", "## Concurrency safety and shared state", "## Built-in language libraries", "## Configuration", "## Building, running and testing"]) {
-			expect(headings(frontier)).toContain(heading);
+		for (const heading of ["## Terminology", "## Creating a project or an integration", "## Keeping code editable in the BI designer", "## Finding a library", "## Imports and dependencies", "## Coding rules", "## Data binding, type casts and narrowing", "## Concurrency safety and shared state", "## Built-in language libraries", "## Configuration", "## Building, running and testing"]) {
+			expect(headings(frontier), `frontier lacks ${heading}`).toContain(heading);
 		}
-		for (const tier of TIERS) expect(render(tier)?.startsWith(frontier)).toBe(true);
+		// The lower tiers differ only by the skeletons appended, so a rule asserted on the frontier text holds on every tier.
+		for (const tier of TIERS) expect(render(tier)?.startsWith(frontier), `${tier} does not start with the frontier text`).toBe(true);
 		expect(render("workhorse")).toBe(frontier);
 		expect(render("cheap")).toContain("## Syntax skeletons");
 		expect(render("tiny")).toBe(render("cheap"));
 		expect(frontier).not.toContain("## Syntax skeletons");
+	});
+
+	it("looks a library up on a named gap, not by default", () => {
+		const text = render("frontier") ?? "";
+		expect(text).toContain("Look something up only when you can name the gap");
+		expect(text).toContain("when the compiler rejects a library name, look it up");
+		expect(text).toContain("a shape this section or a loaded skill shows");
+		expect(text).toContain("Never web-search for a first-party Ballerina API fact");
+	});
+
+	it("keeps each lookup small: one question, text output, nested types read once, the readme only for a reason", () => {
+		const text = render("frontier") ?? "";
+		expect(text).toContain("Ask one question per command");
+		expect(text).toContain("Always add `--output-format text`");
+		expect(text).toContain("Read the nested types there; do not open them again");
+		expect(text).toContain("only for a package you do not know at all");
+		expect(text).toContain("Stop as soon as you can write the code");
+		expect(text).toContain("Never read a readme to get your bearings");
+	});
+
+	it("sends learning a library to the librarian by a count of lookups", () => {
+		const text = render("frontier") ?? "";
+		expect(text).toContain("when one or two commands answer the question");
+		expect(text).toContain("likely to take three or more lookups");
+		expect(text).toContain("its report costs your context far less than the raw answers would");
+		expect(text).toContain("Write one brief per independent external system");
+		expect(text).toContain("tell the user in one short sentence what you are looking up");
+		expect(text).toContain("so do not look them up again");
+		expect(text).toContain("What it lists as not confirmed, or does not cover, look up before you write code that depends on it");
+		expect(text).toContain("goes to the same librarian, not a new one");
+		expect(text).toContain("it needs no lookup and no librarian");
+		expect(text).toContain("`bal discover client <Client> -p <org>/<name> --output-format text`");
+	});
+
+	it("shows the lower tiers a reserved word quoted as an identifier", () => {
+		const quoted = "foreach Order 'order in orders";
+		for (const tier of ["cheap", "tiny"] as const) expect(render(tier)).toContain(quoted);
+		for (const tier of ["frontier", "workhorse"] as const) expect(render(tier)).not.toContain(quoted);
+	});
+
+	it("keys the route on Agent only, and never names the deferred SendMessage", () => {
+		for (const tier of TIERS) {
+			expect(render(tier)).toContain("`Agent` tool");
+			expect(toolReference("SendMessage").test(render(tier) ?? ""), `${tier} names SendMessage`).toBe(false);
+			const noAgent = render(tier, ["read", "bash", "edit", "write"]) ?? "";
+			expect(toolReference("Agent").test(noAgent), `${tier} names Agent without it`).toBe(false);
+			expect(/librarian/i.test(noAgent), `${tier} mentions the librarian without Agent`).toBe(false);
+			expect(noAgent).not.toContain("two kinds");
+		}
 	});
 
 	it("routes configuration through config_status and library lookup through the shell", () => {
@@ -106,38 +185,115 @@ describe("the # Ballerina section", () => {
 	});
 });
 
-function frontmatterOf(path: string): { frontmatter: Record<string, unknown>; body: string } {
+function frontmatterOf(source: string): { frontmatter: Record<string, unknown>; body: string } {
 	// Strict YAML: the loose fallback would hide a description that does not parse.
-	const parsed = parseFrontmatter(readFileSync(path, "utf8")) as { frontmatter?: Record<string, unknown>; body: string };
+	const parsed = parseFrontmatter(source) as { frontmatter?: Record<string, unknown>; body: string };
 	return { frontmatter: parsed.frontmatter ?? {}, body: parsed.body };
 }
 
+/**
+ * Every `bal discover` command written out in a text, for the text-output
+ * rule: in single backticks, and on a line of a fenced code block.
+ */
+function discoverCommands(text: string): string[] {
+	const inline = [...text.matchAll(/(?<!`)`(bal discover [^`]+)`/g)].map((match) => match[1]);
+	const fenced: string[] = [];
+	let inFence = false;
+	for (const line of text.split("\n")) {
+		if (/^\s*```/.test(line)) inFence = !inFence;
+		else if (inFence) for (const match of line.matchAll(/\bbal discover [^;|&#]+/g)) fenced.push(match[0].trim());
+	}
+	return [...inline, ...fenced];
+}
+
+/** Every SKILL.md under profile/skills/ and every file under profile/agents/, found by listing the folders. */
+function bundledTexts(): Array<[string, string]> {
+	const skills = readdirSync(join(PROFILE, "skills"), { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.map((entry): [string, string] => [entry.name, readFileSync(join(PROFILE, "skills", entry.name, "SKILL.md"), "utf8")]);
+	const agents = readdirSync(join(PROFILE, "agents")).map((file): [string, string] => [file, readFileSync(join(PROFILE, "agents", file), "utf8")]);
+	return [...skills, ...agents];
+}
+
+describe("bal discover commands in the text", () => {
+	it("ask for text output everywhere a command is written out", () => {
+		const texts: Array<[string, string]> = [
+			["the frontier section", render("frontier") ?? ""],
+			["the cheap section", render("cheap") ?? ""],
+			...bundledTexts(),
+		];
+		let seen = 0;
+		for (const [label, text] of texts) {
+			for (const command of discoverCommands(text)) {
+				seen++;
+				expect(command, `${label}: ${command}`).toContain("--output-format text");
+			}
+		}
+		expect(seen).toBeGreaterThan(20);
+	});
+
+	it("finds a command in a fenced block", () => {
+		expect(discoverCommands("```bash\nbal discover type A -p o/n\n```")).toEqual(["bal discover type A -p o/n"]);
+	});
+});
+
 describe("the Ballerina skills", () => {
+	it("tell the reader to use the library shapes they show as written, not to look them up", () => {
+		for (const skill of ["agent-builder", "workflow-builder"]) {
+			const text = readFileSync(join(PROFILE, "skills", skill, "SKILL.md"), "utf8").replace(/\s+/g, " ");
+			expect(text, skill).toContain("as shown and do not look them up");
+		}
+	});
+
 	for (const skill of SKILLS) {
 		it(`${skill} has valid frontmatter naming its folder, and names no foreign tool`, () => {
-			const path = join(PROFILE, "skills", skill, "SKILL.md");
-			const { frontmatter, body } = frontmatterOf(path);
+			const source = readFileSync(join(PROFILE, "skills", skill, "SKILL.md"), "utf8");
+			const { frontmatter, body } = frontmatterOf(source);
 			expect(frontmatter.name).toBe(skill);
 			expect(typeof frontmatter.description).toBe("string");
 			expect(String(frontmatter.description).length).toBeGreaterThan(40);
 			expect(body.trim().length).toBeGreaterThan(0);
-			expectNoForeignTools(skill, readFileSync(path, "utf8"));
-			expect(readFileSync(path, "utf8").includes(EM_DASH), `${skill} has an em dash`).toBe(false);
+			expectNoForeignTools(skill, source);
+			expect(source.includes(EM_DASH), `${skill} has an em dash`).toBe(false);
 		});
 	}
 });
 
 describe("the librarian agent", () => {
+	it("is described as the way to learn a library, and reports enough to write from", () => {
+		const { frontmatter, body } = frontmatterOf(readFileSync(join(PROFILE, "agents", "librarian.md"), "utf8"));
+		expect(String(frontmatter.description)).toMatch(/^The way to learn a Ballerina library or connector/);
+		expect(String(frontmatter.description)).toContain("Not for one named symbol");
+		const flat = body.replace(/\s+/g, " ");
+		expect(flat).toContain("under about 4,000 characters for each external system");
+		expect(flat).toContain("Stop also after 8 commands that read a chosen library's API");
+		expect(flat).toContain("The searches and overviews you run to find and choose the library do not count toward the 8");
+		expect(flat).toContain("never as `resource function`");
+		for (const part of ["**Imports**", "**Creating it**", "**Services**", "**Calls**", "**Types**", "**Defaults that change behavior**", "**Not confirmed**"]) expect(body).toContain(part);
+	});
+
+	it("every bundled agent declares model: inherit", () => {
+		// `inherit` becomes the session model with One Code commit 2c0ddd93; on the
+		// current base it is read as no model, which gives the automatic
+		// same-provider pick (working-docs/findings/03-base-harness/agent-model.md).
+		// Loose parsing: explore's description holds a colon followed by a space.
+		for (const agent of BUNDLED_AGENTS) {
+			const { frontmatter } = parseFrontmatterLoosely(readFileSync(join(PROFILE, "agents", `${agent}.md`), "utf8"));
+			expect(frontmatter.model, agent).toBe("inherit");
+		}
+	});
+
 	for (const agent of AGENTS) {
-		it(`${agent} has valid frontmatter naming its file, a shell-and-read tool set and a cheaper model`, () => {
-			const path = join(PROFILE, "agents", `${agent}.md`);
-			const { frontmatter, body } = frontmatterOf(path);
+		it(`${agent} has valid frontmatter naming its file and a shell-and-read tool set`, () => {
+			const source = readFileSync(join(PROFILE, "agents", `${agent}.md`), "utf8");
+			const { frontmatter, body } = frontmatterOf(source);
 			expect(frontmatter.name).toBe(agent);
 			expect(typeof frontmatter.description).toBe("string");
 			expect(String(frontmatter.tools).split(/,\s*/)).toEqual(["bash", "read"]);
-			expect(frontmatter.model).toBe("haiku");
 			expect(body).toContain("bal discover");
-			expectNoForeignTools(agent, readFileSync(path, "utf8"));
+			expectNoForeignTools(agent, source);
+			// A colon followed by a space in a description drops the agent from the listing.
+			expect(String(frontmatter.description)).not.toContain(": ");
 		});
 	}
 });

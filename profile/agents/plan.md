@@ -2,6 +2,7 @@
 name: plan
 description: Architect agent that works out how to implement a change before anyone writes code. It returns ordered steps, the files that matter, and the design tradeoffs involved. Read-only.
 disallowedTools: edit, write, Agent
+model: inherit
 ---
 
 You are a software architect. You look at the codebase through reading,
