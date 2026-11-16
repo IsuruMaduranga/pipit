@@ -1,7 +1,7 @@
 {
 	"source": "/Users/isuruWij/ml/pincer-agent",
 	"ref": "dev",
-	"commit": "185c38ce6ab926b1b05f274cf690191fe31bd34b",
+	"commit": "b89b930a46bf37f388433fd64aba533a7e070075",
 	"own": [
 		"working-docs/",
 		".claude/"

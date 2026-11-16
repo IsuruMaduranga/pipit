@@ -10,11 +10,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@earendil-works/pi-ai/compat", () => ({
-	completeSimple: vi.fn(),
-}));
-
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { completeSimple as CompleteSimple } from "@earendil-works/pi-ai/compat";
+import { registryStream } from "./helpers/side-call-registry.ts";
 import {
 	classify,
 	createClassifierState,
@@ -30,6 +27,9 @@ import type { ClassifierBlock } from "../../extensions/safety/permissions/auto-m
 import { actionLength, MAX_ACTION_CHARS } from "../../extensions/safety/permissions/auto-mode/transcript.ts";
 import { pinCatalog } from "./catalog-fixture.ts";
 import { autoModeResultText } from "../../extensions/safety/permissions/auto-mode/text.ts";
+
+/** Stands in for the provider behind the model registry's stream (helpers/side-call-registry.ts). */
+const completeSimple = vi.fn<typeof CompleteSimple>();
 
 /** The profile's words for a block the classifier could not judge. */
 const blockText = (block: ClassifierBlock) => autoModeResultText.classifierBlock(block);
@@ -78,6 +78,7 @@ function makeDeps(overrides: Partial<Parameters<typeof classify>[1]> = {}) {
 	const deps = {
 		registry: {
 			getAvailable: () => [sessionModel, miniModel, tinyModel],
+			streamSimple: registryStream(completeSimple),
 			getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "key" }),
 		} as any,
 		sessionModel,
@@ -167,6 +168,7 @@ describe("classify: pinning and fallback", () => {
 				catalogReads++;
 				return [sessionModel, miniModel, tinyModel];
 			},
+			streamSimple: registryStream(completeSimple),
 			getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "key" }),
 		} as any;
 		const deps = { registry, sessionModel, config, state: createClassifierState(), onNotice: () => {} };
@@ -251,18 +253,36 @@ describe("classify: pinning and fallback", () => {
 	});
 
 	it("walks auth failures the same way as provider rejections", async () => {
+		const unusable: Array<[string, string]> = [];
+		const getAuth = vi.fn(async (m: any) => (m.id === "gpt-5-mini" ? { ok: false as const, error: "no key" } : { ok: true as const, apiKey: "key" }));
 		const { deps } = makeDeps({
 			registry: {
 				getAvailable: () => [sessionModel, miniModel, tinyModel],
-				getApiKeyAndHeaders: async (m: any) =>
-					m.id === "gpt-5-mini" ? { ok: false as const, error: "no key" } : { ok: true as const, apiKey: "key" },
+				streamSimple: registryStream(completeSimple),
+				getApiKeyAndHeaders: getAuth,
 			} as any,
+			onModelUnusable: (model: string, error: string) => unusable.push([model, error]),
 		});
-		completeMock.mockResolvedValue(allowReply());
+		// pi's runtime refuses the model it cannot resolve a credential for, generically.
+		completeMock.mockImplementation(async (m: any) => (m.id === "gpt-5-mini" ? errorReply("Provider is not configured: openai") : allowReply()));
 		const verdict = await classify(request, deps);
 		expect(verdict.decision).toBe("allow");
 		expect(deps.state.rejected.has("openai/gpt-5-mini")).toBe(true);
+		expect(unusable).toEqual([["openai/gpt-5-mini", "no key"]]);
 		expect(deps.state.pinned?.id).toBe("gpt-5.1-mini");
+		// Only the failed call asked the registry why; the working model's calls did not.
+		expect(getAuth).toHaveBeenCalledTimes(1);
+	});
+
+	it("asks the registry nothing after a failure that is not a credential refusal", async () => {
+		const getAuth = vi.fn(async () => ({ ok: true as const, apiKey: "key" }));
+		const { deps } = makeDeps({
+			registry: { getAvailable: () => [sessionModel, miniModel, tinyModel], streamSimple: registryStream(completeSimple), getApiKeyAndHeaders: getAuth } as any,
+		});
+		completeMock.mockResolvedValue(errorReply("529 Overloaded"));
+		await classify(request, deps);
+		expect(completeMock).toHaveBeenCalled();
+		expect(getAuth).not.toHaveBeenCalled();
 	});
 });
 
@@ -554,6 +574,7 @@ describe("classify: a provider that refuses the classifier's prompt", () => {
 		const { deps, notices } = makeDeps({
 			registry: {
 				getAvailable: () => [sessionModel],
+				streamSimple: registryStream(completeSimple),
 				getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "key" }),
 			} as any,
 		});

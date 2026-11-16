@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 let btwExtension: typeof import("../../extensions/agents/btw/index.ts").default;
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { completeSimple as CompleteSimple } from "@earendil-works/pi-ai/compat";
+import { registryStream } from "./helpers/side-call-registry.ts";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 
-vi.mock("@earendil-works/pi-ai/compat", () => ({ completeSimple: vi.fn() }));
+/** Stands in for the provider behind the model registry's stream (helpers/side-call-registry.ts). */
+const completeSimple = vi.fn<typeof CompleteSimple>();
+
 vi.mock("../../extensions/lib/side-calls/side-call-usage.ts", () => ({ logSideCallUsage: vi.fn(), SIDE_CALL_KINDS: ["reader", "btw", "recap"] }));
 
 const complete = vi.mocked(completeSimple);
@@ -22,7 +25,7 @@ function setup(model = { api: "anthropic-messages", provider: "anthropic", id: "
 	const ctx = createFakeCtx({
 		mode: "rpc", hasUI: true,
 		model,
-		modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
+		modelRegistry: { streamSimple: registryStream(completeSimple), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
 	});
 	const ui = ctx.ui as { custom: ReturnType<typeof vi.fn>; notify: ReturnType<typeof vi.fn> };
 	const ask = (question: string) => fake.commands.get("btw")!.handler(question, ctx);
@@ -107,6 +110,48 @@ describe("/btw in RPC", () => {
 		expect(t.ui.notify).toHaveBeenCalledWith("Side question failed: Connection closed", "error");
 	});
 
+	it("leaves the credential to pi's runtime on a call that succeeds", async () => {
+		const t = setup();
+		const getAuth = vi.fn(async () => ({ ok: true, apiKey: "test" }));
+		(t.ctx.modelRegistry as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = getAuth;
+		complete.mockResolvedValue(answer("The side answer."));
+		await t.ask("A side question?");
+		expect(getAuth).not.toHaveBeenCalled();
+	});
+
+	it("names pi's credential error, not the runtime's generic refusal", async () => {
+		const t = setup();
+		const getAuth = vi.fn(async () => ({ ok: false, error: "OAuth refresh failed for anthropic" }));
+		(t.ctx.modelRegistry as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = getAuth;
+		complete.mockResolvedValue({ content: [], stopReason: "error", errorMessage: "Provider is not configured: anthropic", usage: {} } as never);
+		await t.ask("A question?");
+		expect(getAuth).toHaveBeenCalledTimes(1);
+		expect(t.ui.notify).toHaveBeenCalledWith(
+			"Side question failed: No usable credentials for anthropic/test: OAuth refresh failed for anthropic. Log in with /login or set the provider's API key.",
+			"error",
+		);
+	});
+
+	it("names the model and the fix for a refusal the registry cannot explain", async () => {
+		const t = setup();
+		complete.mockResolvedValue({ content: [], stopReason: "error", errorMessage: "Provider is not configured: anthropic", usage: {} } as never);
+		await t.ask("A question?");
+		expect(t.ui.notify).toHaveBeenCalledWith(
+			"Side question failed: No usable credentials for anthropic/test: Provider is not configured: anthropic. Log in with /login or set the provider's API key.",
+			"error",
+		);
+	});
+
+	it("reports any other provider error as pi gave it, with no credential lookup", async () => {
+		const t = setup();
+		const getAuth = vi.fn(async () => ({ ok: true }));
+		(t.ctx.modelRegistry as { getApiKeyAndHeaders: unknown }).getApiKeyAndHeaders = getAuth;
+		complete.mockResolvedValue({ content: [], stopReason: "error", errorMessage: "529 Overloaded", usage: {} } as never);
+		await t.ask("A question?");
+		expect(t.ui.notify).toHaveBeenCalledWith("Side question failed: 529 Overloaded", "error");
+		expect(getAuth).not.toHaveBeenCalled();
+	});
+
 	it("aborts on shutdown and does not publish a late answer", async () => {
 		const t = setup();
 		let resolve!: (value: Awaited<ReturnType<typeof completeSimple>>) => void;
@@ -133,7 +178,7 @@ describe("/btw's standalone context follows the current branch", () => {
 			mode: "rpc",
 			hasUI: true,
 			model: { api: "anthropic-messages", provider: "anthropic", id: "test" },
-			modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
+			modelRegistry: { streamSimple: registryStream(completeSimple), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
 			sessionManager: { getSessionId: () => "s", getBranch: () => [], buildSessionProjection: () => ({ messages: branchMessages }) },
 		});
 		await fake.fire("session_start", {}, ctx);
@@ -158,7 +203,7 @@ describe("/btw's standalone context follows the current branch", () => {
 			mode: "rpc",
 			hasUI: true,
 			model: { api: "anthropic-messages", provider: "anthropic", id: "test" },
-			modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
+			modelRegistry: { streamSimple: registryStream(completeSimple), getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test" }) },
 			sessionManager: { getSessionId: () => "s", getBranch: () => branch },
 		});
 		await fake.fire("session_start", {}, ctx);

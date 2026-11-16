@@ -10,7 +10,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import brand from "../brand.json" with { type: "json" };
-import { BI_JAR, ballerinaLanguageServer, brandStateDir, jarPath, LAUNCHER_PATH, launcherArgs, launcherProblem, parseLauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
+import { BI_JAR, ballerinaLanguageServer, jarPath, LAUNCHER_PATH, launcherArgs, launcherProblem, parseLauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
+import { sharedStateDir } from "../../extensions/sdk/profile.ts";
 import { profile } from "../index.ts";
 
 const SCRIPT = fileURLToPath(new URL("../extensions/ballerina/language-server.sh", import.meta.url));
@@ -45,9 +46,8 @@ describe("the declared server", () => {
 		expect(declared.args[1].endsWith(join("language-server", BI_JAR.fileName))).toBe(true);
 	});
 
-	it("keeps the jar in the brand's state folder, which the brand's variable moves", () => {
-		expect(brandStateDir({}, "/home/u")).toBe(join("/home/u", brand.stateDir));
-		expect(brandStateDir({ [`${brand.envPrefix}_STATE_DIR`]: "/elsewhere" }, "/home/u")).toBe("/elsewhere");
+	it("keeps the jar in the folder every profile shares", () => {
+		expect(jarPath()).toBe(join(sharedStateDir(), "language-server", BI_JAR.fileName));
 		expect(jarPath("/s")).toBe(join("/s", "language-server", BI_JAR.fileName));
 		expect(launcherArgs("/j")).toEqual(["/j", "73406195", "2201.14", "25"]);
 	});

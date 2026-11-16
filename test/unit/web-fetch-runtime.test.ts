@@ -3,13 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { completeSimple as CompleteSimple } from "@earendil-works/pi-ai/compat";
+import { registryStream } from "./helpers/side-call-registry.ts";
 import webFetchExtension from "../../extensions/tools/web-fetch/index.ts";
 import type { FetchAnswer } from "../../extensions/tools/web-fetch/text.ts";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
 import { webFetchResultText } from "../../extensions/tools/web-fetch/text.ts";
 
-vi.mock("@earendil-works/pi-ai/compat", () => ({ completeSimple: vi.fn() }));
+/** Stands in for the provider behind the model registry's stream (helpers/side-call-registry.ts). */
+const completeSimple = vi.fn<typeof CompleteSimple>();
+
 vi.mock("../../extensions/lib/side-calls/side-call-usage.ts", () => ({ logSideCallUsage: vi.fn(), SIDE_CALL_KINDS: ["reader", "btw", "recap"] }));
 
 const complete = vi.mocked(completeSimple);
@@ -26,14 +29,14 @@ const reader = "test-provider/reader-model";
 const rawResult = (body: string, answer: FetchAnswer = { kind: "raw" }) =>
 	`${webFetchResultText().header({ url, upgraded: false, noArticle: false, answer })}\n\n${[webFetchResultText().page.before, "<page>", body, "</page>", webFetchResultText().page.after].join("\n")}`;
 
-function harness(getAuth = async () => ({ ok: true, apiKey: "test-key" })) {
+function harness() {
 	const model = { provider: "test-provider", id: "reader-model", api: "openai-completions", input: ["text"], cost: { input: 1, output: 2 } };
 	const ctx = createFakeCtx({
 		model,
 		sessionManager: { getSessionId: () => "fetch-runtime", getSessionDir: () => work },
 		modelRegistry: {
 			getAvailable: () => [model],
-			getApiKeyAndHeaders: getAuth,
+			streamSimple: registryStream(completeSimple),
 		},
 	});
 	const fake = createFakePi();
@@ -47,7 +50,7 @@ beforeEach(() => {
 	complete.mockReset().mockResolvedValue(reply("stop", "Version 3.2."));
 	vi.stubGlobal("fetch", vi.fn(async () => new Response(rawPage, { headers: { "content-type": "text/plain" } })));
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); rmSync(work, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllGlobals(); rmSync(work, { recursive: true, force: true }); });
 
 describe("web-fetch runtime regressions", () => {
 	it.each(["error", "aborted"])("does not present a reader %s with partial text as an answer", async (reason) => {
@@ -72,22 +75,6 @@ describe("web-fetch runtime regressions", () => {
 		const result = await harness()({ prompt: "Which release?" }, controller.signal);
 		expect(result.isError).toBe(true);
 		expect(result.content[0].text).toBe(webFetchResultText().cancelled(url));
-	});
-
-	it("bounds stalled reader authentication and does not start a late model call", async () => {
-		vi.useFakeTimers();
-		let release!: (auth: { ok: boolean; apiKey: string }) => void;
-		const getAuth = () => new Promise<{ ok: boolean; apiKey: string }>((resolve) => { release = resolve; });
-		let settled = false;
-		const pending = harness(getAuth)({ prompt: "Which release?" }).then((result) => { settled = true; return result; });
-		await vi.advanceTimersByTimeAsync(60_001);
-		const settledAtDeadline = settled;
-		release({ ok: true, apiKey: "test-key" });
-		const result = await pending;
-		await vi.advanceTimersByTimeAsync(0);
-		expect(settledAtDeadline).toBe(true);
-		expect(result.content[0].text).toBe(rawResult(rawPage, { kind: "raw", readerFailure: { kind: "credentialsTimeout", reader, seconds: 60 } }));
-		expect(complete).not.toHaveBeenCalled();
 	});
 
 	it("does not start a download after the caller already cancelled", async () => {

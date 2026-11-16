@@ -10,9 +10,10 @@ import { profile } from "../index.ts";
 
 /**
  * The tools a main session of this product defers (seen in a live request,
- * 2026-11-15), plus the MCP resource tools. It pins the set of hints; it
- * cannot see the base rename a tool or start deferring a new one, so after a
- * sync compare it with a live request's listing.
+ * 2026-11-16), plus the MCP resource tools. The typecheck catches a hint for
+ * a tool the base renamed or no longer defers (the keys are its
+ * `DeferrableTool`). Neither sees a tool the base starts deferring, so after
+ * a sync compare this list with a live request's listing.
  */
 const DEFERRED = ["task_output", "task_stop", "SendMessage", "task_create", "task_get", "task_list", "task_update", "enter_plan_mode", "exit_plan_mode", "web_search", "web_fetch", "lsp_diagnostics", "list_mcp_resources", "read_mcp_resource", "read_mcp_resource_dir"];
 

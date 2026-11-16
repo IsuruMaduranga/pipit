@@ -18,6 +18,9 @@
  * non-standard resources/directory/read for golden://dir and golden://empty.
  */
 
+// With EXIT_PROBE_STUBBORN (the exit probe's launchers) it outlives a closed stdin, SIGINT and SIGHUP.
+import "./stubborn.mjs";
+
 const INSTRUCTIONS = "Use the golden tools for golden checks. Resources live under golden://.";
 
 let tools = [

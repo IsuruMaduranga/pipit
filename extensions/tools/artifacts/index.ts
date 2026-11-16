@@ -17,17 +17,17 @@ import { StringEnum } from "../../lib/core/string-enum.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readJsonFile } from "../../lib/core/atomic-write.ts";
-import { DEFER_CHANNEL } from "../../lib/request/deferred.ts";
+import { deferBaseTool } from "../../lib/request/deferred.ts";
 import { findProjectRoot } from "../../lib/context/git.ts";
 import { registerLocalCommand } from "../../lib/ui/local-command.ts";
 import { productSettingsPath } from "../../lib/profile/product-settings.ts";
-import { openInBrowser } from "../../lib/ui/open-browser.ts";
+import { type NoBrowser, openInBrowser } from "../../lib/ui/open-browser.ts";
 import { tildify } from "../../lib/profile/paths.ts";
 import { sanitizeDisplayText, terminalLink } from "../../lib/ui/terminal-text.ts";
 import { resolveToolPath } from "../../lib/rules/tool-path.ts";
 import { toolRenderers } from "../../lib/ui/tui-render.ts";
 import { requireText } from "../../lib/profile/profile.ts";
-import type { ArtifactsText, NoBrowser, PublishBrowser, PublishProblem } from "./text.ts";
+import type { ArtifactsText, PublishBrowser, PublishProblem } from "./text.ts";
 import {
 	type ArtifactMeta,
 	artifactsRoot,
@@ -218,7 +218,7 @@ function artifactsExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.events.emit(DEFER_CHANNEL, { name: "artifact", keywords: ["artifact", "html", "page", "browser", "report", "dashboard", "visualize", "publish"] });
+	deferBaseTool(pi.events, "artifact", ["artifact", "html", "page", "browser", "report", "dashboard", "visualize", "publish"]);
 
 	registerLocalCommand(pi, "artifacts", {
 		description: "Browse, open, export or delete saved artifacts",

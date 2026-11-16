@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { allowedHost, isUnknownMethod, MODEL_TIMEOUT_MS, modelRequest, projectInfoRequest, type Route, type RouteContext, route, sameToken } from "../extensions/ballerina/visualize/routes.ts";
+import { allowedHost, MODEL_TIMEOUT_MS, modelRequest, projectInfoRequest, type Route, type RouteContext, route, sameToken } from "../extensions/ballerina/visualize/routes.ts";
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "view-routes-")));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -123,15 +123,4 @@ describe("the language-server requests", () => {
 		expect(MODEL_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
 	});
 
-	it("tells the stock server's unknown method from any other refusal by the error's data", () => {
-		const method = "designModelService/projectInfo";
-		const refused = (data?: unknown) => ({ method, code: -32603, message: "Internal error.", ...(data === undefined ? {} : { data }) });
-		expect(isUnknownMethod(refused(`java.lang.UnsupportedOperationException: The json request '${method}' is unknown.\n\tat org.eclipse…`))).toBe(true);
-		expect(isUnknownMethod(refused({ trace: `java.lang.UnsupportedOperationException: The json request '${method}' is unknown.` }))).toBe(true);
-		expect(isUnknownMethod(refused("java.lang.NullPointerException"))).toBe(false);
-		expect(isUnknownMethod(refused())).toBe(false);
-		expect(isUnknownMethod(undefined)).toBe(false);
-		// The protocol's own code, from a server that uses it.
-		expect(isUnknownMethod({ method, code: -32601, message: "Unhandled method" })).toBe(true);
-	});
 });

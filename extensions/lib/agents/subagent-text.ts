@@ -66,6 +66,8 @@ export type SubagentRefusal =
 	| { kind: "couldNotStart"; problem: string }
 	/** No run of a background launch started; `lines` holds the notes and each run's failed launch line. */
 	| { kind: "noneLaunched"; lines: string[] }
+	/** A launch that failed because the session is ending, so calling Agent again cannot help; `lines` as in `noneLaunched`. */
+	| { kind: "sessionEnding"; lines: string[] }
 	/** SendMessage from the main conversation to "main". */
 	| { kind: "mainIsNotRecipient" }
 	/** SendMessage to a name or id no run has; `known` lists the runs. */
@@ -221,6 +223,8 @@ function refused(refusal: SubagentRefusal, product: SubagentClauses): string {
 			return `Could not start the agent: ${refusal.problem}`;
 		case "noneLaunched":
 			return `${refusal.lines.join("\n")}\n\nNo agent started, so no notification will arrive. Fix the problem above and call Agent again, or do the task yourself.`;
+		case "sessionEnding":
+			return `${refusal.lines.join("\n")}\n\nNo agent started, so no notification will arrive: the session is ending. Do not call Agent again; finish without it and tell the user what is left.`;
 		case "mainIsNotRecipient":
 			return 'You are the main conversation — "main" is only a valid recipient from inside a subagent.';
 		case "noRun":

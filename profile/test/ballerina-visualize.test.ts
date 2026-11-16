@@ -158,9 +158,15 @@ describe("/visualize", () => {
 	});
 
 	it("prints the address when no browser can open", async () => {
-		const f = fakes({ openBrowser: vi.fn(async () => "ssh" as const) });
+		const f = fakes({ openBrowser: vi.fn(async () => ({ reason: "ssh" as const })) });
 		const view = await open(f);
 		expect(f.ui.notices).toEqual([["warning", `Integration view: ${view.url} (open it in a browser; none was started because this is an SSH session)`]]);
+	});
+
+	it("names the opener that failed to start", async () => {
+		const f = fakes({ openBrowser: vi.fn(async () => ({ reason: "launchFailed" as const, command: "xdg-open", osMessage: "spawn xdg-open ENOENT" })) });
+		const view = await open(f);
+		expect(f.ui.notices).toEqual([["warning", `Integration view: ${view.url} (open it in a browser; none was started because the system's browser opener (xdg-open) did not start: spawn xdg-open ENOENT)`]]);
 	});
 
 	it("announces a first download and shows its progress", async () => {

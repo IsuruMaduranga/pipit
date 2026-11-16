@@ -13,10 +13,9 @@
  * (`bi-jar.md` "Starting the jar", `jar-publishing.md`).
  */
 
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import brand from "../../brand.json" with { type: "json" };
+import { sharedStateDir } from "../../../extensions/sdk/profile.ts";
 
 export interface JarPin {
 	/** The BI extension release that carries the jar. */
@@ -56,18 +55,10 @@ export const BALLERINA_SERVER = "ballerina";
 export const LAUNCHER_PATH = fileURLToPath(new URL("./language-server.sh", import.meta.url));
 
 /**
- * The product's state folder, by the brand's names: `<envPrefix>_STATE_DIR`,
- * else `~/<stateDir>`. The default profile's brand, so every profile of the
- * product shares one downloaded jar. It repeats the base's `sharedStateDir`,
- * which neither SDK door exports (the extension's `productStateDir` follows
- * the profile in force).
+ * Where the downloaded jar lives: under the folder every profile of the
+ * product shares, so a second profile reuses one download.
  */
-export function brandStateDir(env: Record<string, string | undefined> = process.env, home: string = homedir()): string {
-	return env[`${brand.envPrefix}_STATE_DIR`] || join(home, brand.stateDir);
-}
-
-/** Where the downloaded jar lives. */
-export function jarPath(stateDir: string = brandStateDir(), pin: JarPin = BI_JAR): string {
+export function jarPath(stateDir: string = sharedStateDir(), pin: JarPin = BI_JAR): string {
 	return join(stateDir, "language-server", pin.fileName);
 }
 

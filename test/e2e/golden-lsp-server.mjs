@@ -7,6 +7,9 @@
  * `clean`, else an error with a code and a source, and a warning.
  */
 
+// With EXIT_PROBE_STUBBORN (the exit probe's launchers) it also ignores the `exit` notification.
+import { stubborn } from "./stubborn.mjs";
+
 const diagnosticsFor = (text) =>
 	text.includes("clean")
 		? []
@@ -30,7 +33,7 @@ function handle(message) {
 		case "shutdown":
 			return send({ id, result: null });
 		case "exit":
-			return process.exit(0);
+			return stubborn ? undefined : process.exit(0);
 		case "textDocument/didOpen":
 			return publish(params.textDocument.uri, params.textDocument.text);
 		case "textDocument/didChange":

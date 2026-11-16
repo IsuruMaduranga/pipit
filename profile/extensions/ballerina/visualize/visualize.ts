@@ -18,10 +18,10 @@
  */
 
 import { basename, isAbsolute, relative } from "node:path";
-import type { LspErrorDetail, LspFileChange, NoBrowserReason } from "../../../../extensions/sdk/extension.ts";
+import { isMethodNotFound, type LspErrorDetail, type LspFileChange, type NoBrowser } from "../../../../extensions/sdk/extension.ts";
 import { type LauncherCheck, launcherProblem } from "../bi-language-server.ts";
 import { findProject, MANIFEST, type Project } from "../project.ts";
-import { isUnknownMethod, type ModelRequest, projectInfoRequest, type ViewPackage } from "./routes.ts";
+import { type ModelRequest, projectInfoRequest, type ViewPackage } from "./routes.ts";
 import { startViewerServer, type ViewerServer, type ViewProject } from "./server.ts";
 import { type ProjectWatcher, watchProject } from "./watcher.ts";
 
@@ -42,7 +42,7 @@ export interface VisualizeEnv {
 	/** Tell the language server about changed files; resolves once it has them (the SDK's `lspFilesChanged`). */
 	sync(changes: LspFileChange[]): Promise<void>;
 	/** Resolves with why no browser opened, or undefined (the SDK's `openInBrowser`). */
-	openBrowser(url: string): Promise<NoBrowserReason | undefined>;
+	openBrowser(url: string): Promise<NoBrowser | undefined>;
 }
 
 export interface JarProgress {
@@ -66,11 +66,16 @@ const NO_PROJECT_MESSAGE = "No Ballerina project here: start the session in an i
 const TIMED_OUT = /\btimed out\b/i;
 
 /** Why no browser opened, as the address notice ends. */
-const NO_BROWSER: Record<NoBrowserReason, string> = {
-	ssh: "this is an SSH session",
-	noDisplay: "there is no desktop display",
-	launchFailed: "the system's browser opener did not start",
-};
+function noBrowserReason(failed: NoBrowser): string {
+	switch (failed.reason) {
+		case "ssh":
+			return "this is an SSH session";
+		case "noDisplay":
+			return "there is no desktop display";
+		case "launchFailed":
+			return `the system's browser opener (${failed.command}) did not start: ${failed.osMessage}`;
+	}
+}
 
 /** The package the page opens first: the one the working directory is in, else the first. */
 export function initialPackage(packages: readonly ViewPackage[], cwd: string): ViewPackage | undefined {
@@ -232,7 +237,8 @@ export class Visualizer {
 		} catch (error) {
 			if (this.stopped) return false;
 			const message = (error as Error).message;
-			if (isUnknownMethod(env.errorDetail(error))) return this.offerRestart(ui, message);
+			const detail = env.errorDetail(error);
+			if (detail && isMethodNotFound(detail)) return this.offerRestart(ui, message);
 			const verb = TIMED_OUT.test(message) ? "did not answer" : "cannot answer";
 			ui.notify(`The Ballerina language server ${verb}: ${message}`, "error");
 			return false;
@@ -270,7 +276,7 @@ export class Visualizer {
 	private async show(url: string, ui: CommandUi): Promise<void> {
 		if (this.stopped) return;
 		const failed = await this.env.openBrowser(url);
-		if (failed) ui.notify(`Integration view: ${url} (open it in a browser; none was started because ${NO_BROWSER[failed]})`, "warning");
+		if (failed) ui.notify(`Integration view: ${url} (open it in a browser; none was started because ${noBrowserReason(failed)})`, "warning");
 		else ui.notify(`Integration view: ${url}`, "info");
 	}
 }

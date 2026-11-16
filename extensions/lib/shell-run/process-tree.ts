@@ -1,49 +1,70 @@
 /**
- * Process-tree termination for the shells One Code spawns in the background
- * (`bash run_in_background`, `monitor`) and for language servers
- * (`tools/lsp/client.ts`), and the one way to wait for such a child to finish.
+ * Owned process trees: how every long-lived child process One Code starts
+ * (background shells and monitors, language servers, stdio MCP servers) is
+ * started, owned and ended, and the one way to wait for a child to finish.
  *
- * A `$SHELL -c "cmd"` child is only the leader: with zsh (macOS default) a
- * `cmd; echo` or a pipeline runs the command in further processes, and
- * `child.kill()` signals the shell alone — the command lives on as an orphan
- * holding the inherited stdout pipe, so `close` never fires (the task cannot
- * finish, a `task_output block:true` waits its full timeout) and in a one-shot
- * run the open pipe keeps node alive until the orphan exits
- * (LIFECYCLE-REVIEW-2026-09-06 M2, measured: 3 min 21 s on a `tail -f | cat`).
+ * A child is only the leader of what it starts. A `$SHELL -c "cmd"` with zsh
+ * (macOS default) runs a `cmd; echo` or a pipeline in further processes, and a
+ * language or MCP server is often a launcher (a shell script, `npx`, a `.cmd`
+ * shim) in front of the real process. `child.kill()` signals the leader alone:
+ * the rest lives on as an orphan holding the inherited stdout pipe, so `close`
+ * never fires (a task cannot finish, a `task_output block:true` waits its full
+ * timeout) and in a one-shot run the open pipe keeps node alive until the
+ * orphan exits (LIFECYCLE-REVIEW-2026-09-06 M2, measured: 3 min 21 s on a
+ * `tail -f | cat`).
  *
- * The producer spawns `detached` (own process group; `detachedSpawnOptions`)
- * and stops it with `killProcessTree`, which signals the negative pid — the
- * whole group — falling back to the child alone when the group is already gone.
- * `stopProcessTree` adds the grace period: SIGTERM now, SIGKILL to the group
- * when it ends, whether or not the leader is still alive. The leader is often
- * only the `bash -c` wrapper, which dies on TERM at once while the command it
- * forked (a dev server in its graceful-shutdown handler) keeps the group and
- * its port; a leader-only check skipped the SIGKILL exactly then
- * (LIFECYCLE-BACKGROUND-REVIEW-2026-09-26 M1, measured). A group whose SIGKILL
- * is still pending when the process exits (pi's quit calls `process.exit`,
- * and the grace timer is unref'd) is SIGKILLed from a `process.on("exit")`
- * hook, so nothing One Code stopped outlives it.
+ * `spawnOwnedTree` is the one way to start such a child. It takes the caller's
+ * spawn call (so each site keeps its own launch: `commandLaunch`'s Windows
+ * shims, `spawnShellCommand`), starts it `detached` (its own process group;
+ * `detachedSpawnOptions`), remembers the group (`rememberProcessGroup`), and
+ * returns the child with the tree's stop policy:
  *
- * `rememberProcessGroup` owns a background shell's or a language server's
- * group for the lifetime of this process, including descendants left by a
- * successfully exited leader.
- * Session replacement must not kill those intentionally launched daemons.
- * Each module instance keeps its own groups through process listeners (never
- * through a session context or cross-extension module state), reaps empty
- * groups, and sends TERM synchronously on process exit or termination signals.
+ * - `stop` (`stopProcessTree`): SIGTERM now, SIGKILL to the group when the
+ *   grace ends, whether or not the leader is still alive. The leader is often
+ *   only a wrapper, which dies on TERM at once while what it forked (a dev
+ *   server in its graceful-shutdown handler) keeps the group and its port; a
+ *   leader-only check skipped the SIGKILL exactly then
+ *   (LIFECYCLE-BACKGROUND-REVIEW-2026-09-26 M1, measured). A group whose
+ *   SIGKILL is still pending when the process exits (pi's quit calls
+ *   `process.exit`, and the grace timer is unref'd) is SIGKILLed from a
+ *   `process.on("exit")` hook.
+ * - `end` (`endProcessTree`): a bounded wait for the leader to exit on its
+ *   own, then `stop`, then wait (bounded) until the group is empty; how a
+ *   language server stops and an MCP server closes, since the leader's exit is
+ *   not its tree's and a replacement must not start beside it.
+ * - `kill` (`killProcessTree`): one signal to the whole group (falling back to
+ *   the child alone when the group is already gone); `taskkill /T /F` on
+ *   Windows, which has no groups.
+ * - `endGroupWithLauncher`: when the leader exits, by itself or on a stop, the
+ *   rest of its group is stopped too. A launcher-fronted server (LSP, MCP)
+ *   needs it; a background shell does not, because the daemons a finished
+ *   shell leaves are deliberate.
+ *
+ * A remembered group is owned for the lifetime of this process, including
+ * what a successfully exited leader left behind; session replacement must not
+ * kill those intentionally launched daemons. Each module instance keeps its
+ * own groups through process listeners (never through a session context or
+ * cross-extension module state), forgets a group once it is empty (probed when
+ * its leader exits, then polled while the leader's leftovers live), and on
+ * process exit or a termination signal sends TERM synchronously and leaves a
+ * watchdog to SIGKILL what outlasts the grace, so nothing One Code owns
+ * outlives the process.
  *
  * `waitForChildExit` is the counterpart on the waiting side: it settles on
- * `exit` plus a short stdio grace, never on `close` alone — a descendant the
+ * `exit` plus a short stdio grace, never on `close` alone: a descendant the
  * kill missed (Windows: a process the `taskkill /T` snapshot did not see) can
  * hold the inherited pipes open for as long as it lives, and the task must not
  * wait for it (pi's `waitForChildProcess` has the same shape and reason).
+ * Short-lived children that a caller awaits (hooks, the bash tool, `!`
+ * expansions) use it with `detachedSpawnOptions` and `killProcessTree`
+ * directly; they are not owned past their wait.
  */
 
-import { type ChildProcess, execFile } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { system32Path } from "../profile/paths.ts";
-import { envName } from "../profile/brand.mjs";
+import { brandedId, envName } from "../profile/brand.mjs";
 
-/** SIGTERM → SIGKILL grace for a stopped tree (bash tasks, monitors, what a language server leaves). */
+/** SIGTERM → SIGKILL grace for a stopped tree (background shells, monitors, what a language or MCP server leaves). */
 export const KILL_GRACE_MS = 2_000;
 
 /** After `exit`, how long buffered stdio may keep arriving before the wait settles. */
@@ -148,9 +169,35 @@ export function killProcessTree(child: ChildProcess, signal: NodeJS.Signals = "S
 	}
 }
 
+/** Marks this module's signal handlers (every module instance's) apart from other listeners. */
+const OWN_SIGNAL_HANDLER = Symbol.for(brandedId("process-tree-signal-handler"));
+
+/**
+ * signal-exit observers on the process (v3 keeps its count on
+ * `process.__signal_exit_emitter__`, v4 under a global symbol). Each one
+ * re-raises a signal once only its own listeners are left, so the process
+ * still dies of it: they do not keep it running.
+ */
+function signalExitObservers(): number {
+	const v3 = (process as { __signal_exit_emitter__?: { count?: number } }).__signal_exit_emitter__?.count ?? 0;
+	const v4 = (globalThis as Record<symbol, { count?: number } | undefined>)[Symbol.for("signal-exit emitter")]?.count ?? 0;
+	return v3 + v4;
+}
+
+/**
+ * Whether a listener other than ours and signal-exit's takes `signal`: pi's
+ * own SIGTERM/SIGHUP shutdown (which ends in `process.exit`, so the exit hook
+ * runs), or one that keeps the process running.
+ */
+function signalHandledElsewhere(signal: NodeJS.Signals): boolean {
+	const foreign = process.listeners(signal).filter((listener) => !(listener as { [OWN_SIGNAL_HANDLER]?: true })[OWN_SIGNAL_HANDLER]);
+	return foreign.length > signalExitObservers();
+}
+
 /** Groups owned by this producer, retained by process listeners across session replacement. */
 const rememberedGroups = new Set<ChildProcess>();
-let groupReaper: NodeJS.Timeout | undefined;
+/** Polls the remembered groups while one is a live orphan (its leader exited, members still running). */
+let orphanReaper: NodeJS.Timeout | undefined;
 const terminationSignals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
 const groupSignalHandlers = new Map<NodeJS.Signals, () => void>();
 
@@ -159,9 +206,9 @@ const groupSignalHandlers = new Map<NodeJS.Signals, () => void>();
  * process groups, so only a live leader is worth a `taskkill /T`; it is judged
  * by the child's own exit state, because once the leader exits Windows may
  * hand its pid to an unrelated process that a pid probe would then find. On
- * POSIX a group id stays reserved while any member lives, and the reaper
- * forgets an emptied group within a second, far sooner than sequential pid
- * allocation wraps around to it.
+ * POSIX a group id stays reserved while any member lives, and an emptied group
+ * is forgotten when its leader exits or within a second of its last member
+ * (`reapGroups`), far sooner than sequential pid allocation wraps around to it.
  */
 export function rememberedGroupAlive(child: ChildProcess): boolean {
 	if (child.pid == null) return false;
@@ -174,95 +221,287 @@ export function rememberedGroupAlive(child: ChildProcess): boolean {
 	}
 }
 
+/** Whether this process has seen the leader exit (Node reaped it: it is no zombie holding the group). */
+function leaderExited(child: ChildProcess): boolean {
+	return child.exitCode !== null || child.signalCode !== null;
+}
+
+/**
+ * Forget every remembered group whose leader has exited and that is now
+ * empty, and drop the process listeners once none is left. Runs when a
+ * leader exits; while a group outlives its leader (a finished shell's
+ * daemon, a launcher's server until its stop lands) an unref'd one-second
+ * poll keeps running, and only then: a group with a live leader is probed
+ * again when that leader exits.
+ */
+function reapGroups(): void {
+	for (const child of rememberedGroups) {
+		if (leaderExited(child) && !rememberedGroupAlive(child)) rememberedGroups.delete(child);
+	}
+	if (rememberedGroups.size === 0) {
+		releaseGroupListeners();
+		return;
+	}
+	const orphans = [...rememberedGroups].some(leaderExited);
+	if (orphans && !orphanReaper) {
+		orphanReaper = setInterval(reapGroups, 1_000);
+		orphanReaper.unref?.();
+	} else if (!orphans && orphanReaper) {
+		clearInterval(orphanReaper);
+		orphanReaper = undefined;
+	}
+}
+
 function releaseGroupListeners(): void {
-	if (groupReaper) clearInterval(groupReaper);
-	groupReaper = undefined;
+	if (orphanReaper) clearInterval(orphanReaper);
+	orphanReaper = undefined;
 	process.removeListener("exit", terminateRememberedGroups);
 	for (const [signal, handler] of groupSignalHandlers) process.removeListener(signal, handler);
 	groupSignalHandlers.clear();
 }
 
-/** Exit handlers cannot await a grace period. Existing explicit stops retain their TERM/KILL escalation below. */
-function terminateRememberedGroups(): void {
-	for (const child of rememberedGroups) {
-		if (rememberedGroupAlive(child)) killProcessTree(child, "SIGTERM");
-	}
-	rememberedGroups.clear();
-	releaseGroupListeners();
+/**
+ * The watchdog `killAfterExit` starts, as a `node -e` script: argv is the
+ * grace in ms, then the group ids. It exits as soon as every group is gone,
+ * and SIGKILLs what is left when the grace runs out.
+ */
+const EXIT_WATCHDOG = [
+	"const [grace, ...groups] = process.argv.slice(1).map(Number);",
+	"const alive = (g) => { try { process.kill(-g, 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };",
+	"const poll = setInterval(() => { if (!groups.some(alive)) process.exit(0); }, 50);",
+	"setTimeout(() => { clearInterval(poll); for (const g of groups) { try { process.kill(-g, 'SIGKILL'); } catch {} } }, grace);",
+].join("\n");
+
+/** How long an exiting process waits, blocking, for groups it just sent SIGTERM to empty before it leaves the rest to the watchdog. */
+const EXIT_TERM_WAIT_MS = 25;
+const EXIT_TERM_POLL_MS = 5;
+
+/** Block this thread for `ms` (an exit handler cannot await). */
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /**
- * Remember a detached background tree from spawn until its group becomes empty.
- * Register before awaiting its leader, so even immediate process exit covers
- * running work. The unref'd reaper cannot keep a print run alive. No session
- * shutdown handler touches this set; the process listeners keep this module
- * instance alive, and reach its set, even after pi evaluates the module again
- * (a /reload, a /resume into another directory: findings §8).
+ * The process is exiting and the groups in `children` were just sent SIGTERM.
+ * An exit handler cannot wait out a grace period, so a member that ignores or
+ * outlasts SIGTERM (a server stuck in its shutdown handler) would outlive the
+ * process: a small detached watchdog, started synchronously (the spawn
+ * happens before `spawn` returns), SIGKILLs the groups still there after
+ * `KILL_GRACE_MS` and exits as soon as none is. It names groups only: a group
+ * id stays reserved while any member lives, so it cannot reach a stranger.
+ * POSIX only; Windows' taskkill /F is already forceful.
+ *
+ * Most groups die of the SIGTERM at once, so when every leader has already
+ * exited (a finished shell's daemons) the handler first waits, blocking, up
+ * to `EXIT_TERM_WAIT_MS` and starts the watchdog only for the groups still
+ * there. A leader this process has not reaped (still running, or dead with
+ * its exit not yet handled) is a zombie until this process exits, and a
+ * zombie keeps its group probeable, so a group with such a leader cannot be
+ * judged here: it goes to the watchdog without the wait.
  */
-export function rememberProcessGroup(child: ChildProcess): void {
+function killAfterExit(children: ChildProcess[]): void {
+	let live = children.filter((child) => child.pid != null);
+	if (process.platform === "win32" || live.length === 0) return;
+	if (live.every(leaderExited)) {
+		for (let waited = 0; waited < EXIT_TERM_WAIT_MS && live.length > 0; waited += EXIT_TERM_POLL_MS) {
+			sleepSync(EXIT_TERM_POLL_MS);
+			live = live.filter(rememberedGroupAlive);
+		}
+		if (live.length === 0) return;
+	}
+	const groups = live.map((child) => child.pid as number);
+	try {
+		const watchdog = spawn(process.execPath, ["-e", EXIT_WATCHDOG, String(KILL_GRACE_MS), ...groups.map(String)], {
+			detached: true,
+			stdio: "ignore",
+			env: {},
+		});
+		watchdog.unref();
+	} catch {
+		// Best effort at exit: the SIGTERM above has gone out regardless.
+	}
+}
+
+/**
+ * SIGTERM every remembered group still running, at exit or on a terminating
+ * signal, and leave a watchdog to SIGKILL what outlasts the grace (an exit
+ * handler cannot await it). A tree stopped earlier whose grace is still
+ * running (`pendingKills`: an MCP server closed just before a one-shot run
+ * exits) already has its SIGTERM: it joins the watchdog without a second
+ * one, so it gets the same grace as a tree never stopped.
+ */
+function terminateRememberedGroups(): void {
+	const live = [...new Set([...rememberedGroups, ...pendingKills])].filter(rememberedGroupAlive);
+	for (const child of live) if (!pendingKills.has(child)) killProcessTree(child, "SIGTERM");
+	rememberedGroups.clear();
+	pendingKills.clear();
+	releaseGroupListeners();
+	killAfterExit(live);
+}
+
+/**
+ * Remember a detached tree from spawn until its group becomes empty
+ * (`spawnOwnedTree` calls it; a long-lived child is never remembered alone).
+ * Register before awaiting its leader, so even immediate process exit covers
+ * running work. The unref'd orphan poll cannot keep a print run alive. No
+ * session shutdown handler touches this set; the process listeners keep this
+ * module instance alive, and reach its set, even after pi evaluates the module
+ * again (a /reload, a /resume into another directory: findings §8).
+ */
+function rememberProcessGroup(child: ChildProcess): void {
 	if (child.pid == null || rememberedGroups.has(child)) return;
 	rememberedGroups.add(child);
-	if (groupReaper) return;
+	child.once("exit", reapGroups);
+	if (groupSignalHandlers.size > 0) return;
 	process.on("exit", terminateRememberedGroups);
 	for (const signal of terminationSignals) {
-		const handler = () => {
-			terminateRememberedGroups();
-			// Do not swallow Node's default signal termination when there is no
-			// pi handler. With isolated producers, the last listener re-raises it.
-			if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
-		};
+		const handler = Object.assign(
+			() => {
+				// Someone else takes the signal: the process is not dying of it
+				// here. Leave the groups to the exit hook, which runs if it does
+				// exit, and listen again once this dispatch is over. Ending them
+				// now killed the language servers and background shells of a
+				// process that kept running (the exit probe's held SIGINT).
+				if (signalHandledElsewhere(signal)) {
+					setImmediate(() => {
+						if (groupSignalHandlers.get(signal) === handler) process.prependOnceListener(signal, handler);
+					});
+					return;
+				}
+				terminateRememberedGroups();
+				// Do not swallow Node's default signal termination when there is no
+				// pi handler. With isolated producers, the last listener re-raises it.
+				if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+			},
+			{ [OWN_SIGNAL_HANDLER]: true as const },
+		);
 		groupSignalHandlers.set(signal, handler);
 		// Run before signal-exit observers: after we remove ourselves they must
 		// still see the original listener count and preserve default termination.
 		process.prependOnceListener(signal, handler);
 	}
-	groupReaper = setInterval(() => {
-		for (const child of rememberedGroups) {
-			if (!rememberedGroupAlive(child)) rememberedGroups.delete(child);
-		}
-		if (rememberedGroups.size === 0) releaseGroupListeners();
-	}, 1_000);
-	groupReaper.unref?.();
 }
 
 /**
  * Trees sent SIGTERM whose SIGKILL has not run yet. Keyed by the child, not
  * its pid, so a pid the OS hands to a new child during the grace does not
  * make that child look already scheduled. Per module instance on purpose
- * (each extension force-kills its own children); one `exit` listener per
- * instance, installed on first use.
+ * (each extension force-kills its own children). Every one is an owned tree,
+ * so the remembered groups' exit hook covers it (`terminateRememberedGroups`).
  */
 const pendingKills = new Set<ChildProcess>();
-let exitHookInstalled = false;
-
-/** The process is exiting: the grace timers will never fire, so force-kill every tree still pending. */
-function killPendingAtExit(): void {
-	for (const child of pendingKills) killProcessTree(child, "SIGKILL");
-	pendingKills.clear();
-}
 
 /**
  * SIGTERM the tree, then SIGKILL the whole group after `graceMs`, whatever
  * the leader's state: a group already gone makes that an ESRCH, and a live
  * group keeps its id reserved, so the id cannot name anyone else. The timer
  * is unref'd (it must never be what keeps a one-shot process alive); a
- * process exit before it fires runs the SIGKILL from the `exit` hook.
+ * process exit before it fires hands the group to the exit watchdog. A tree
+ * already in its grace is left to it: a second SIGTERM (with its SIGSTOP and
+ * SIGCONT) could land in a server's shutdown handler.
  */
-export function stopProcessTree(child: ChildProcess, graceMs: number): void {
+function stopProcessTree(child: ChildProcess, graceMs: number): void {
+	if (pendingKills.has(child)) return;
 	killProcessTree(child, "SIGTERM");
 	// taskkill /F is already forceful; there is no gentler first signal to grace.
 	if (process.platform === "win32") return;
-	if (child.pid == null || pendingKills.has(child)) return;
+	if (child.pid == null) return;
 	pendingKills.add(child);
-	if (!exitHookInstalled) {
-		exitHookInstalled = true;
-		process.on("exit", killPendingAtExit);
-	}
 	const timer = setTimeout(() => {
 		if (!pendingKills.delete(child)) return;
 		killProcessTree(child, "SIGKILL");
 	}, graceMs);
 	timer.unref?.();
+}
+
+/** How often `endProcessTree` checks whether the stopped group has emptied. */
+const GROUP_POLL_MS = 50;
+/** How long `endProcessTree` waits past the TERM grace for the SIGKILLed group to empty. */
+export const KILL_SETTLE_MS = 250;
+
+/** The longest `endProcessTree(child, graceMs, leaderMs)` takes: the leader's grace, the TERM grace and the SIGKILL's settling. */
+export const endTreeMaxMs = (graceMs: number, leaderMs = 0): number => leaderMs + graceMs + KILL_SETTLE_MS;
+
+/**
+ * Give the leader up to `leaderMs` to exit on its own (after a polite close:
+ * stdin ended, a protocol `exit`), then stop the tree (`stopProcessTree`) and
+ * resolve once it has no member left (`endTreeMaxMs` bounds the whole wait).
+ * A leader's exit is not its tree's: a launcher's server lives on through its
+ * TERM grace (or a whole grace, if it ignores TERM), and what replaces it must
+ * not start beside it. On Windows the tree is its leader
+ * (`rememberedGroupAlive`).
+ */
+async function endProcessTree(child: ChildProcess, graceMs: number, leaderMs = 0): Promise<void> {
+	if (leaderMs > 0 && !leaderExited(child)) {
+		await new Promise<void>((resolve) => {
+			const settle = () => {
+				clearTimeout(timer);
+				child.off("exit", settle);
+				resolve();
+			};
+			const timer = setTimeout(settle, leaderMs);
+			timer.unref();
+			child.once("exit", settle);
+		});
+	}
+	if (!rememberedGroupAlive(child)) return;
+	stopProcessTree(child, graceMs);
+	// A deadline, not a count of polls: a loaded machine fires each poll late, and the
+	// MCP client's close timeout is built from this bound (endTreeMaxMs).
+	const deadline = Date.now() + graceMs + KILL_SETTLE_MS;
+	while (rememberedGroupAlive(child) && Date.now() < deadline) {
+		await new Promise<void>((resolve) => setTimeout(resolve, GROUP_POLL_MS).unref());
+	}
+}
+
+/** A long-lived child in its own process group, owned until this process exits, and how to end its tree. */
+export interface OwnedTree {
+	readonly child: ChildProcess;
+	/** SIGTERM the tree now and SIGKILL its group after `graceMs`; a tree already stopping is left to that stop (`stopProcessTree`). */
+	stop(graceMs: number): void;
+	/** Wait up to `leaderMs` for the leader to exit, then `stop` and resolve once no member is left, at most `endTreeMaxMs` (`endProcessTree`). */
+	end(graceMs: number, leaderMs?: number): Promise<void>;
+	/** Send one signal to the whole tree, with no grace (`killProcessTree`). */
+	kill(signal: NodeJS.Signals): void;
+	/** Whether the tree still has a member to end (`rememberedGroupAlive`). */
+	alive(): boolean;
+}
+
+export interface OwnedTreeOptions {
+	/**
+	 * When the leader exits, by itself or on a stop, stop the rest of its
+	 * group (SIGTERM, SIGKILL after `KILL_GRACE_MS`). For a launcher in front of
+	 * the real process (a language or MCP server's script, `npx`, a `.cmd`
+	 * shim), which can exit and leave the server running. Off for a background
+	 * shell: what a finished shell leaves behind is deliberate and lives until
+	 * the process exits.
+	 */
+	endGroupWithLauncher?: boolean;
+}
+
+/**
+ * Start a long-lived child as an owned tree: `start` makes the spawn call
+ * with the given options spread into its own (on POSIX they make the child
+ * the leader of a new process group; Windows has none, and the tree is
+ * reached through its leader), and the group is remembered at once, so the
+ * process's exit and termination-signal hooks end it even if nothing else
+ * does. Every long-lived spawner goes through here (test/unit/process-spawners.test.ts).
+ */
+export function spawnOwnedTree(start: (detached: { detached: boolean }) => ChildProcess, options: OwnedTreeOptions = {}): OwnedTree {
+	const child = start(detachedSpawnOptions());
+	rememberProcessGroup(child);
+	if (options.endGroupWithLauncher) {
+		child.on("exit", () => {
+			if (rememberedGroupAlive(child)) stopProcessTree(child, KILL_GRACE_MS);
+		});
+	}
+	return {
+		child,
+		stop: (graceMs) => stopProcessTree(child, graceMs),
+		end: (graceMs, leaderMs) => endProcessTree(child, graceMs, leaderMs),
+		kill: (signal) => killProcessTree(child, signal),
+		alive: () => rememberedGroupAlive(child),
+	};
 }
 
 export interface ChildExit {

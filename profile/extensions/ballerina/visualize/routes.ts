@@ -14,7 +14,6 @@
  */
 
 import { isAbsolute, relative, resolve } from "node:path";
-import type { LspErrorDetail } from "../../../../extensions/sdk/extension.ts";
 
 export interface Position {
 	line: number;
@@ -164,18 +163,4 @@ export function modelRequest(target: Extract<Route, { kind: "design" | "artifact
 /** The jar answers this one and the stock server does not: it tells the two apart. */
 export function projectInfoRequest(pkg: ViewPackage): ModelRequest {
 	return { routeFile: resolve(pkg.dir, "Ballerina.toml"), method: "designModelService/projectInfo", params: { projectPath: pkg.dir }, timeoutMs: MODEL_TIMEOUT_MS };
-}
-
-/**
- * Whether a server's refusal says it does not know the method: what the stock
- * server answers to `projectInfoRequest`. It answers a plain "Internal
- * error." (JSON-RPC -32603) like any other failure; only the error's data
- * names the unknown request (working-docs/findings/02-language-server/stock-server.md,
- * "An unknown method"). The protocol's own code for it, -32601, counts too.
- */
-export function isUnknownMethod(detail: LspErrorDetail | undefined): boolean {
-	if (detail?.code === -32601) return true;
-	if (!detail || detail.data === undefined) return false;
-	const data = typeof detail.data === "string" ? detail.data : JSON.stringify(detail.data);
-	return /UnsupportedOperationException: The json request '[^']*' is unknown/.test(data);
 }

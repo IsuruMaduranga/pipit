@@ -1,14 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { registryStream } from "./helpers/side-call-registry.ts";
+
+/** Stands in for the provider behind the model registry's stream (helpers/side-call-registry.ts). */
 const completeSimple = vi.fn();
-vi.mock("@earendil-works/pi-ai/compat", () => ({ completeSimple: (...args: unknown[]) => completeSimple(...args) }));
 
 const { replaySideCall } = await import("../../extensions/lib/side-calls/replay-call.ts");
 const { captureRequest, LastExchange } = await import("../../extensions/lib/side-calls/request-replay.ts");
 
 const model = { api: "anthropic-messages", provider: "my-proxy", id: "claude-sonnet-5", baseUrl: "https://proxy.example" } as never;
 const ctx = {
-	modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }) },
+	modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }), streamSimple: registryStream(completeSimple, { apiKey: "k" }) },
 	sessionManager: { getSessionId: () => "s1" },
 } as never;
 
@@ -66,6 +68,16 @@ describe("replaySideCall", () => {
 		await replaySideCall(ctx, model, exchange(), "q2", { signal: new AbortController().signal, timeoutMs: 1000, onUsage: () => {}, history });
 		const sent = completeSimple.mock.calls[0][1].messages as { content: { text: string }[] }[];
 		expect(sent.map((m) => m.content[0].text)).toEqual(["q1", "a1", "q2"]);
+	});
+
+	it("throws on a credential refusal with its cause, so the caller does not ask the same provider again", async () => {
+		const getApiKeyAndHeaders = vi.fn(async () => ({ ok: false, error: "No API key found for \"my-proxy\"" }));
+		const refusing = { ...(ctx as object), modelRegistry: { getApiKeyAndHeaders, streamSimple: registryStream(completeSimple) } } as never;
+		completeSimple.mockResolvedValue({ ...reply("error"), errorMessage: "Provider is not configured: my-proxy" });
+		await expect(replaySideCall(refusing, model, exchange(), "q", { signal: new AbortController().signal, timeoutMs: 1000, onUsage: () => {} })).rejects.toThrow(
+			'No usable credentials for my-proxy/claude-sonnet-5: No API key found for "my-proxy". Log in with /login',
+		);
+		expect(getApiKeyAndHeaders).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not call the model without a capture for it", async () => {

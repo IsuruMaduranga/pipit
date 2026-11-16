@@ -15,6 +15,7 @@ import type { McpServer } from "./config.ts";
 import { collectPages } from "./discovery.ts";
 import { failureOf, McpFailureError, shownStderr } from "./failure.ts";
 import { McpAuthenticationRequiredError } from "./oauth/provider.ts";
+import { ProcessGroupStdioTransport, STDIO_CLOSE_MAX_MS, type StdioFraming } from "./stdio-transport.ts";
 import { type McpFailure, type McpStep, mcpResultText } from "./text.ts";
 
 /**
@@ -25,7 +26,7 @@ import { type McpFailure, type McpStep, mcpResultText } from "./text.ts";
 let sdkPromise:
 	| Promise<{
 			Client: typeof import("@modelcontextprotocol/sdk/client/index.js").Client;
-			StdioClientTransport: typeof import("@modelcontextprotocol/sdk/client/stdio.js").StdioClientTransport;
+			stdioFraming: StdioFraming;
 			StreamableHTTPClientTransport: typeof import("@modelcontextprotocol/sdk/client/streamableHttp.js").StreamableHTTPClientTransport;
 			SSEClientTransport: typeof import("@modelcontextprotocol/sdk/client/sse.js").SSEClientTransport;
 			UnauthorizedError: typeof import("@modelcontextprotocol/sdk/client/auth.js").UnauthorizedError;
@@ -44,7 +45,7 @@ type HttpTransport = StreamableHTTPClientTransport | SSEClientTransport;
 function loadSdk() {
 	sdkPromise ??= Promise.all([
 		import("@modelcontextprotocol/sdk/client/index.js"),
-		import("@modelcontextprotocol/sdk/client/stdio.js"),
+		import("@modelcontextprotocol/sdk/shared/stdio.js"),
 		import("@modelcontextprotocol/sdk/client/streamableHttp.js"),
 		import("@modelcontextprotocol/sdk/client/auth.js"),
 		import("@modelcontextprotocol/sdk/client/sse.js"),
@@ -54,7 +55,7 @@ function loadSdk() {
 		sseErrorClass = sse.SseError;
 		return {
 			Client: client.Client,
-			StdioClientTransport: stdio.StdioClientTransport,
+			stdioFraming: { ReadBuffer: stdio.ReadBuffer, serializeMessage: stdio.serializeMessage },
 			StreamableHTTPClientTransport: http.StreamableHTTPClientTransport,
 			SSEClientTransport: sse.SSEClientTransport,
 			UnauthorizedError: auth.UnauthorizedError,
@@ -174,16 +175,19 @@ function buildTransport(
 ): { transport: Transport; stderrTail: () => string } {
 	const tail = createTailBuffer();
 	if (server.kind === "stdio") {
-		const transport = new sdk.StdioClientTransport({
-			command: server.command,
-			args: server.args,
-			// The user's own environment under the bundled app (lib/app/app-launch.mjs), then the server's.
-			env: { ...(childProcessEnv(process.env) as Record<string, string>), ...(server.env ?? {}) },
-			...(server.cwd ? { cwd: server.cwd } : {}),
-			stderr: "pipe",
-		});
+		// Its own process group, ended with this process and on close (stdio-transport.ts).
+		const transport = new ProcessGroupStdioTransport(
+			{
+				command: server.command,
+				args: server.args,
+				// The user's own environment under the bundled app (lib/app/app-launch.mjs), then the server's.
+				env: { ...childProcessEnv(process.env), ...(server.env ?? {}) },
+				...(server.cwd ? { cwd: server.cwd } : {}),
+			},
+			sdk.stdioFraming,
+		);
 		// The PassThrough exists before start(); drain it from the first byte.
-		transport.stderr?.on("data", (chunk: string | Uint8Array) => tail.push(chunk));
+		transport.stderr.on("data", (chunk: string | Uint8Array) => tail.push(chunk));
 		return { transport, stderrTail: tail.text };
 	}
 	const lifetime = new AbortController();
@@ -465,10 +469,18 @@ export async function readResourceDir(connection: Connection, uri: string, signa
 	) as Record<string, unknown>;
 }
 
+/**
+ * How long `close()` waits for the client to close: past the longest a stdio
+ * server's transport takes (its stdin grace, then its TERM grace), so a
+ * stubborn server's close finishes its escalation instead of being abandoned
+ * in the middle of it. Other transports close well inside it.
+ */
+export const CLOSE_TIMEOUT_MS = STDIO_CLOSE_MAX_MS + 500;
+
 export async function close(connection: Connection): Promise<void> {
 	connection.closing = true;
 	try {
-		await withTimeout(connection.client.close(), 3000, "close", connection.server.name);
+		await withTimeout(connection.client.close(), CLOSE_TIMEOUT_MS, "close", connection.server.name);
 	} catch {
 		// A server that won't close cleanly should not block shutdown.
 	}
