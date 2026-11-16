@@ -10,7 +10,7 @@
 
 import type { LiveTools, SubagentsText } from "../../../extensions/sdk/profile.ts";
 import { agentDescription } from "./agent-description.ts";
-import { guideAgent } from "./guide-agent.ts";
+import { GUIDE_CONTINUE, guideAgent } from "./guide-agent.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
 
 /** Names both background-task tools: cut when either is off. */
@@ -18,10 +18,20 @@ const TASK_TOOLS_PASSAGE = [
     "- Reach for task_output only when nothing you do next can proceed without the result (block=true waits for it), and end a run with task_stop. You must fetch both through tool_search before the first call, since they are deferred.\n",
 ] as const;
 
+/** The Agent description's passages naming a sibling tool. pi's --exclude-tools can take SendMessage out alone (a deferred SendMessage is still one the session can have). */
 const AGENT_PASSAGES: ToolPassages = {
     task_output: TASK_TOOLS_PASSAGE,
     task_stop: TASK_TOOLS_PASSAGE,
+    SendMessage: [
+        ["- To continue an agent you already started, with its context intact, use SendMessage with its name or ID. A new Agent call starts from scratch", "- A new Agent call starts from scratch"],
+        ["- SendMessage with the agent's name or ID in `to` resumes an agent you already started, with its full context. A new Agent call starts an agent", "- A new Agent call starts an agent"],
+        " SendMessage talks to a run while it is working and resumes it once it is done.",
+    ],
 };
+
+/** The pointers to SendMessage in the Agent tool's `name` parameter and the guide agent's description. */
+const AGENT_NAME_PASSAGES: ToolPassages = { SendMessage: [["What to call this run so SendMessage can address it later;", "What to call this run;"]] };
+const GUIDE_PASSAGES: ToolPassages = { SendMessage: [GUIDE_CONTINUE] };
 
 /** SendMessage's pointer to list_agents: cut when list_agents is off. */
 const SEND_MESSAGE_PASSAGES: ToolPassages = {
@@ -51,7 +61,7 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
             task: "The task: a complete instruction that stands on its own (the agent cannot ask follow-up questions).",
             prompt: "Another name for `task`: the instruction the agent carries out.",
             description: "A short title for the run, 3 to 5 words, shown while it works.",
-            name: "What to call this run so SendMessage can address it later; <agent>-<n> if omitted",
+            name: withoutOff("What to call this run so SendMessage can address it later; <agent>-<n> if omitted", live, AGENT_NAME_PASSAGES),
             model:
                 'This call\'s model, overriding the agent\'s own: "sonnet"/"opus"/"haiku"/"fable" (resolved within this session\'s provider), "inherit", or an exact provider/model-id; the subagent-models reminder lists what is available. A fork refuses it (a fork keeps this conversation\'s model)',
             allow_expensive: "Required when the per-call `model` is pricier per token than the model of this session. Pass it only if the user asked for that exact model",
@@ -127,8 +137,8 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
         ].join("\n"),
         delegationWithdrawn: "The delegation guidance shown earlier in this conversation no longer applies.",
         // Sent only once the Agent tool is gone, so it names no tool.
-        catalogWithdrawn: "The agents listed earlier in this conversation can no longer be started in this session.",
-        modelsWithdrawn: "The subagent models listed earlier in this conversation no longer apply.",
-        guideAgent,
+        catalogWithdrawn: "Agents cannot be started in this session any more, so disregard the agent list given before.",
+        modelsWithdrawn: "Disregard the menu of subagent models given before: it no longer applies.",
+        guideAgent: { ...guideAgent, description: withoutOff(guideAgent.description, live, GUIDE_PASSAGES) },
     };
 };

@@ -10,7 +10,7 @@
  * the project's source, its own knowledge), and the compiler's diagnostics
  * after each edit are the check. Library lookup is for a named gap, not a
  * default; learning a library goes to the `librarian` agent once three or
- * more lookups are likely, on every tier (librarianRoute). The cheap and
+ * more lookups are likely, on every tier (LIBRARIAN_ROUTE). The cheap and
  * tiny tiers also get syntax skeletons: correct shapes in context to write
  * from, where a weaker model would otherwise spend compiler rounds.
  *
@@ -34,41 +34,78 @@ import { type LiveTools, type ToolPassages, withoutOff } from "../../../extensio
 /**
  * The file tools the session can have, of `write` and `edit`, as the text
  * names them. A passage naming them lists only those present, and is cut
- * when neither is. Worded per combination here rather than in `PASSAGES`:
- * one tool off rewords the passage, both off removes it or says to build
- * instead, which per-tool cuts cannot express.
+ * when neither is. Worded here rather than in `PASSAGES`, whose cuts each
+ * follow one tool: these wordings depend on two at once (both file tools
+ * off).
  */
 function fileTools(live: LiveTools): string[] {
 	return ["write", "edit"].filter((tool) => live.has(tool)).map((tool) => `\`${tool}\``);
 }
 
 /**
- * How the model gets the compiler's errors: after each edit when the session
- * has a file tool (the language server checks it), else only from
- * `bal build`. The write-first passages say whichever is true.
+ * Whether the compiler's errors come on their own after each change.
+ * `arrive`: a file tool makes the change and `lsp_diagnostics` is live.
+ * `unknown`: a file tool, but no `lsp_diagnostics`. The block comes from the
+ * base's `lsp` feature, which runs the language server and adds
+ * `<new-diagnostics>` to an edit's result whether or not its tool is live;
+ * the section sees only tools, so the text neither promises nor denies the
+ * block (a section that can see features needs a base seam, asked of One
+ * Code). `none`: no file tool, so no change is checked on its own. Decided
+ * here rather than in `PASSAGES`, whose cuts each follow one tool: these
+ * wordings depend on two at once (no file tool, or no diagnostics).
  */
-const compilerCheck = (files: string[]) =>
-	files.length > 0
-		? { loop: "the compiler errors that arrive after each edit, and \`bal build\`, \`bal test\` and \`bal run\` through the shell", cost: "The compiler checks every edit, and a wrong name or signature costs one short error and one fix.", confirm: "write the code and let the compiler check it" }
-		: { loop: "the compiler errors \`bal build\` reports (no check arrives on its own after a change in this session), and \`bal test\` and \`bal run\` through the shell", cost: "Run \`bal build\` after a change to get the compiler's errors: a wrong name or signature costs one short error and one fix.", confirm: "write the code and check it with \`bal build\`" };
+type CheckState = "arrive" | "unknown" | "none";
+function checkState(live: LiveTools, files: string[]): CheckState {
+	if (files.length === 0) return "none";
+	return live.has("lsp_diagnostics") ? "arrive" : "unknown";
+}
 
-/** Source files change only through the file tools, the only changes the compiler checks. Empty without them. */
-function fileToolsRule(files: string[]): string {
+/** The build-first wording, true whether or not an edit's result carries diagnostics. */
+const BUILD_CHECK = {
+	cost: "Run \`bal build\` after a change to get the compiler's errors: a wrong name or signature costs one short error and one fix.",
+	confirm: "write the code and check it with \`bal build\`",
+};
+
+/**
+ * How the model gets the compiler's errors, per `CheckState`. The
+ * write-first passages say whichever is true.
+ */
+const compilerCheck = (state: CheckState) =>
+	state === "arrive"
+		? { state, loop: "the compiler errors that arrive after each edit, and \`bal build\`, \`bal test\` and \`bal run\` through the shell", cost: "The compiler checks every edit, and a wrong name or signature costs one short error and one fix.", confirm: "write the code and let the compiler check it" }
+		: state === "unknown"
+			? { state, loop: "the compiler errors \`bal build\` reports, and \`bal test\` and \`bal run\` through the shell", ...BUILD_CHECK }
+			: { state, loop: "the compiler errors \`bal build\` reports (no check arrives on its own after a change in this session), and \`bal test\` and \`bal run\` through the shell", ...BUILD_CHECK };
+
+/**
+ * Source files change only through the file tools, the only changes the
+ * compiler checks; the reason is given only when the checks arrive. Empty
+ * without a file tool.
+ */
+function fileToolsRule(files: string[], state: CheckState): string {
 	if (files.length === 0) return "";
-	return `\n- Create and change \`.bal\` files only with ${files.join(" and ")}, never through the shell: no heredoc, \`echo\`, \`tee\`, \`sed -i\` or script that writes them. A change made through the shell gets no compiler check (see Editing files and diagnostics), and writing first and letting the compiler check (see Finding a library) depends on that check. Commands that generate or format code (\`bal format\`, \`bal openapi\`) are the exception.`;
+	const reason = state === "arrive" ? " A change made through the shell gets no compiler check (see Editing files and diagnostics), and writing first and letting the compiler check (see Finding a library) depends on that check." : "";
+	return `\n- Create and change \`.bal\` files only with ${files.join(" and ")}, never through the shell: no heredoc, \`echo\`, \`tee\`, \`sed -i\` or script that writes them.${reason} Commands that generate or format code (\`bal format\`, \`bal openapi\`) are the exception.`;
 }
 
 /** Loading a fitting skill first; cut with the `skill` tool. */
 const SKILL_RULE = "\n- Before you start, check whether a skill fits the task and load it with the `skill` tool: `data-map` for a data mapper or any transformation between types, `agent-builder` for an `ai:Agent`, `workflow-builder` for a `ballerina/workflow` process, `connector` when the user supplies an OpenAPI spec. A skill's rules take precedence over the general rules below.";
 
+/** How a project or an integration is made: with `create_integration`, or by hand without it. */
+const CREATE_WITH_TOOL = "Create both with the `create_integration` tool. Give it the integration's name (a letter first, then letters, digits or underscores), and optionally a title, an org and `library: true`. It writes the layout above exactly as the BI designer expects it: the integration's `Ballerina.toml`, the standard source files (empty), `.vscode/settings.json` and `launch.json`, and `.gitignore`, and it lists the folder in the project's `packages` array. When the working directory is not inside a project, the same call makes the working directory a project (the root `Ballerina.toml` and its BI marker) with this integration as its first.";
+const CREATE_BY_HAND = "No tool here creates them, so write the layout above by hand, exactly as shown: the root `Ballerina.toml` with only its `[workspace]` section and the integration in `packages`, the BI marker in both `.vscode/settings.json` files, the integration's `Ballerina.toml`, its standard source files (empty), `.vscode/launch.json` and `.gitignore`. Leave `Config.toml` to the user.";
+
+/** The after-edit wording, built once per render. */
+type CompilerCheck = ReturnType<typeof compilerCheck>;
+
 /** Terminology, layout, creating projects, the designer rules, scope. */
-const overview = (files: string[]) => `# Ballerina
+const overview = (files: string[], check: CompilerCheck) => `# Ballerina
 
 You work on WSO2 Integrator projects (Ballerina Integrator, "BI"), written in Ballerina. Ballerina's libraries and connectors change between releases, so an API you remember may have moved; "Finding a library" says when to look a library up.
 
-- Work in a loop: make a rough plan, write the code, then refine it with real feedback: ${compilerCheck(files).loop}. When debugging, get one signal first, then narrow down.${fileToolsRule(files)}
+- Work in a loop: make a rough plan, write the code, then refine it with real feedback: ${check.loop}. When debugging, get one signal first, then narrow down.${fileToolsRule(files, check.state)}
 - Use your own reasoning for what does not depend on Ballerina specifics: control flow, data-mapping logic, splitting a task into steps, and reading tool output or project source already in context.
-- Write library code from what you already have: this section, a loaded skill, the project's source, earlier answers in this conversation, and your own knowledge of Ballerina. ${compilerCheck(files).cost} Never invent an API and then defend it: when the compiler rejects a library name, look it up instead of trying variations.${SKILL_RULE}
+- Write library code from what you already have: this section, a loaded skill, the project's source, earlier answers in this conversation, and your own knowledge of Ballerina. ${check.cost} Never invent an API and then defend it: when the compiler rejects a library name, look it up instead of trying variations.${SKILL_RULE}
 
 ## Terminology
 
@@ -117,7 +154,7 @@ A package may hold both a \`main\` function and services, but module initializat
 
 ## Creating a project or an integration
 
-Create both with the \`create_integration\` tool. Give it the integration's name (a letter first, then letters, digits or underscores), and optionally a title, an org and \`library: true\`. It writes the layout above exactly as the BI designer expects it: the integration's \`Ballerina.toml\`, the standard source files (empty), \`.vscode/settings.json\` and \`launch.json\`, and \`.gitignore\`, and it lists the folder in the project's \`packages\` array. When the working directory is not inside a project, the same call makes the working directory a project (the root \`Ballerina.toml\` and its BI marker) with this integration as its first.
+${CREATE_WITH_TOOL}
 
 - Never use \`bal new\` for a BI project. It writes a different layout (a hello-world \`main.bal\`, a \`.devcontainer.json\`, no standard files), and inside a project whose \`packages\` array is empty it adds a second \`packages\` line that breaks the build.
 - Do not write the layout by hand either: a missing file or marker changes how the designer shows the integration.
@@ -150,7 +187,7 @@ Resolve genuine requirement gaps before implementing, with one \`ask_user_questi
 const LIBRARIAN_ROUTE = `\nRun a lookup yourself when you know the symbol, or when one or two commands answer the question. When learning a library is likely to take three or more lookups, or several candidate libraries must be compared, delegate it to the \`librarian\` agent with the \`Agent\` tool: its report costs your context far less than the raw answers would.\n\nWrite one brief per independent external system and start them all in the same message, so they run in parallel; keep related parts (a listener and the module that binds its payloads, a client and its auth module) in one brief. A brief says what the integration must do (systems, protocols, operations, payload shapes, constraints, whether it calls an API or listens for events), never the raw user request. Before you start one, tell the user in one short sentence what you are looking up. Wait for the report, then write the code from it: it quotes signatures from Central, so do not look them up again. What it lists as not confirmed, or does not cover, look up before you write code that depends on it. A follow-up question about the same library goes to the same librarian, not a new one: it answers from what it already read.\n`;
 
 /** When to look a library up, which route a lookup takes, and how to keep each one small. */
-function findingALibrary(files: string[]): string {
+function findingALibrary(check: CompilerCheck): string {
 	return `## Finding a library
 
 Library facts come from Ballerina Central, through the shell. Look something up only when you can name the gap, and know which of two kinds it is:
@@ -160,7 +197,7 @@ Library facts come from Ballerina Central, through the shell. Look something up 
 Neither kind applies to what you already have: it needs no lookup and no librarian. Never look up:
 - a shape this section or a loaded skill shows: they are checked against the installed distribution, so write them as shown;
 - anything an earlier answer or report in this conversation already printed;
-- a library you know well, only to confirm it before writing: ${compilerCheck(files).confirm}.
+- a library you know well, only to confirm it before writing: ${check.confirm}.
 ${LIBRARIAN_ROUTE}
 How to look up:
 - Ask one question per command, and go straight to the symbol when you know its name.
@@ -474,14 +511,15 @@ int itemCount = items.length();
 \`\`\`
 To convert between XML and records, use the \`ballerina/data.xmldata\` module.`;
 
-/** How the file tools' edits are checked, the one home of that fact; cut when the session has neither tool. */
-function editChecks(files: string[]): string {
-	if (files.length === 0) return "";
+/** How the file tools' edits are checked, the one home of that fact, per `CheckState`. */
+function editChecks(files: string[], state: CheckState): string {
+	if (state === "none") return "";
+	if (state === "unknown") return `\n- Check each change to a \`.bal\` file with \`bal build\`. When the result of a change carries a \`<new-diagnostics>\` block, it lists the compiler errors that change newly caused anywhere in its package.`;
 	return `\n- Only a change made with ${files.join(" or ")} is checked. After each one on a \`.bal\` file the Ballerina language server checks it, and the compiler errors the change newly caused anywhere in its package arrive in a \`<new-diagnostics>\` block; no block means no new errors.`;
 }
 
 /** Configuration, diagnostics, building, running and testing, common errors. */
-const running = (files: string[]) => `## Configuration
+const running = (files: string[], check: CompilerCheck) => `## Configuration
 
 - Declare a \`configurable\` for every external value, in the integration's \`config.bal\`. Use only \`string\`, \`int\`, \`byte\`, \`float\`, \`decimal\` and \`boolean\`, or arrays of them. Never use a langlib-qualified subtype such as \`int:Signed32\` or \`int:Unsigned16\`, even when a connector parameter uses one: it compiles and then fails at run time ("is not supported"). Widen to the base type and convert when you call the client.
 - Never give a configurable a hardcoded default: write \`configurable string apiKey = ?;\`. The one exception is an OAuth2 refresh-token grant's \`refreshUrl\`: declare \`configurable string refreshUrl\` and reference it in the auth config, with the provider's token endpoint as its default when the library's type documents one (\`configurable string refreshUrl = "<provider-token-endpoint>";\`), otherwise \`= ?\`.
@@ -493,7 +531,7 @@ const running = (files: string[]) => `## Configuration
 
 ## Editing files and diagnostics
 
-- The project's source is not in the conversation. Find code with the shell (\`ls\`, \`find\`, \`grep\`) and read a file before editing it.${editChecks(files)}
+- The project's source is not in the conversation. Find code with the shell (\`ls\`, \`find\`, \`grep\`) and read a file before editing it.${editChecks(files, check.state)}
 - Errors that only reflect work in progress (a symbol you have yet to define in another file) are expected; fix the rest before moving on. \`lsp_diagnostics\` gives a file's full current list on demand. \`bal build\` from the project root checks every integration.
 - Prefer changing existing \`.bal\` files over creating new ones, unless the user asks for a new file.
 
@@ -605,10 +643,23 @@ function fetchOrders() returns Order[]|error {     // block body: a plain functi
 
 /**
  * Per tool, the passages that name it, cut (or reworded) when the session
- * cannot have it. The file tools are worded by `fileTools`.
+ * cannot have it. The file tools and the after-edit checks are worded by
+ * `fileTools` and `checksArrive`.
  */
 const PASSAGES: ToolPassages = {
-	skill: [SKILL_RULE],
+	skill: [SKILL_RULE, " (load the \`agent-builder\` skill)", " (load the \`workflow-builder\` skill)", " (the \`agent-builder\` skill explains why)"],
+	// The product's own tools, which a pi flag or the tool switches can take out.
+	create_integration: [
+		[CREATE_WITH_TOOL, CREATE_BY_HAND],
+		"\n- Do not write the layout by hand either: a missing file or marker changes how the designer shows the integration.",
+		"\n- The tool only creates. It refuses a name whose folder exists, and a working directory that is a single Ballerina package rather than a project; in that case ask the user where the project should live.",
+		["- After it runs, put the code", "- Then put the code"],
+	],
+	config_status: [
+		[" To see what is declared and what is set, call \`config_status\`: it lists each configurable variable with its type, whether \`Config.toml\` sets it, and the line to add, never a value.", " To see what is declared, read the \`configurable\` declarations in the source; whether \`Config.toml\` sets each one, only the user can tell you."],
+		[", then check with \`config_status\`.", ", and to tell you when it is done."],
+		["; \`config_status\` reports both, so check it after the user edits the file.", ": when a run fails that way, name the line for the user to remove or fix."],
+	],
 	Agent: [", and know which of two kinds it is", " and no librarian", LIBRARIAN_ROUTE],
 	ask_user_question: [[", with one \`ask_user_question\` call that batches every question.", ", asking every question in one message."]],
 	lsp_diagnostics: [" \`lsp_diagnostics\` gives a file's full current list on demand."],
@@ -618,7 +669,8 @@ const PASSAGES: ToolPassages = {
 
 function core(live: LiveTools): string {
 	const files = fileTools(live);
-	return withoutOff([overview(files), findingALibrary(files), IMPORTS, CODE_RULES, DOMAINS, LANGLIBS, running(files)].join("\n\n"), live, PASSAGES);
+	const check = compilerCheck(checkState(live, files));
+	return withoutOff([overview(files, check), findingALibrary(check), IMPORTS, CODE_RULES, DOMAINS, LANGLIBS, running(files, check)].join("\n\n"), live, PASSAGES);
 }
 
 /**

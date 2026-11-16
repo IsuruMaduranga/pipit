@@ -3,21 +3,34 @@
  * redaction every session gets (session.ts), the `# Ballerina` section of
  * the system prompt (prompt.ts), one notice when Ballerina is missing or
  * out of date on this machine (environment.ts), which points the model at
- * the `ballerina-setup` skill, and the `/visualize` command
- * (visualize/visualize.ts), which shows the integration's diagrams in a
- * browser and adds nothing to the model's request. A child session loads
- * child.ts instead.
+ * the `ballerina-setup` skill, one notice for the user when the session
+ * model sits below the tier the product works best on (tier-notice.ts), and
+ * the `/visualize` command (visualize/visualize.ts), which shows the
+ * integration's diagrams in a browser. Neither of the last two adds anything
+ * to the model's request. A child session loads child.ts instead.
  */
 
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { lspErrorDetail, lspFilesChanged, lspRequest, openInBrowser, REMINDER_CHANNEL, type ReminderPayload, SYSTEM_PROMPT_SECTION_CHANNEL, type SystemPromptSection } from "../../../extensions/sdk/extension.ts";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	lspErrorDetail,
+	lspFilesChanged,
+	lspRequest,
+	openInBrowser,
+	queueNotice,
+	REMINDER_CHANNEL,
+	type ReminderPayload,
+	sessionModelTier,
+	SYSTEM_PROMPT_SECTION_CHANNEL,
+	type SystemPromptSection,
+} from "../../../extensions/sdk/extension.ts";
 import brand from "../../brand.json" with { type: "json" };
 import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "./bi-language-server.ts";
 import { probeBallerina, setupNotice } from "./environment.ts";
 import { ensureJar } from "./jar-download.ts";
 import { ballerinaSection } from "./prompt.ts";
 import { registerBallerinaSession } from "./session.ts";
+import { createTierNotices, type NoticeModel } from "./tier-notice.ts";
 import { type CommandUi, Visualizer } from "./visualize/visualize.ts";
 
 export const BALLERINA_SECTION_ID = "ballerina";
@@ -46,8 +59,25 @@ function commandUi(ctx: ExtensionCommandContext): CommandUi {
 export const NO_INTERFACE_MESSAGE = "/visualize needs the interactive terminal: the page lives as long as the session. Start the product without -p or --mode, then run /visualize.";
 
 export default function ballerina(pi: ExtensionAPI) {
+	// While loading, before this extension's own handlers: the tier's owner on the bus classifies first.
+	const tier = sessionModelTier(pi);
 	registerBallerinaSession(pi);
 	pi.events.emit(SYSTEM_PROMPT_SECTION_CHANNEL, { id: BALLERINA_SECTION_ID, place: "tail", render: ballerinaSection } satisfies SystemPromptSection);
+
+	// The user's notice when the session model sits below the floor: never in the request.
+	const tierNotices = createTierNotices();
+	const tierNotice = (ctx: ExtensionContext, model: NoticeModel | undefined) => {
+		// Only a session with an interface that outlives the turn (the terminal, an RPC client): a one-shot
+		// run would print it on every scripted call, with no way to turn it off.
+		if (!ctx.hasUI || (ctx.mode !== "tui" && ctx.mode !== "rpc")) return;
+		// The user's off switch belongs here, once the SDK lets a product extension read a setting
+		// (One Code is building `productSetting`); not before it is synced.
+		const text = tierNotices.noticeFor(ctx.sessionManager.getSessionId(), model, tier());
+		// Joined with the other startup and model-switch notices.
+		if (text) queueNotice(pi.events, ctx, "warning", text);
+	};
+	pi.on("session_start", (_event, ctx) => tierNotice(ctx, ctx.model));
+	pi.on("model_select", (event, ctx) => tierNotice(ctx, event.model));
 
 	// The check runs beside the session, never in its way: the session starts
 	// at once, and the notice joins the next request after the answer is in.

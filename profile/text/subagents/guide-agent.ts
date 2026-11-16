@@ -25,7 +25,10 @@ const ISSUES_URL = `${brand.homepage}/issues`;
  */
 export const GUIDE_TOOLS = ["bash", "read", "web_fetch", "web_search"];
 
-export const GUIDE_DESCRIPTION = `Start this agent for questions about ${brand.name} itself ("Can ${brand.name}...", "Does ${brand.name}...", "How do I..."): its commands and settings, permission modes including auto mode, skills, subagents, hooks, plugins, MCP servers, model and provider choice, keyboard shortcuts, installing it, and fixing problems with it. Start it too when the user wants a capability ${brand.name} lacks: the agent finds a feature or setting that already covers it, or explains how to build it as a skill, an agent, a hook, an MCP server or a pi extension of their own. **IMPORTANT:** First check for a ${GUIDE_AGENT} agent that is running or just finished, and continue that one with SendMessage rather than starting another.`;
+/** The guide description's pointer to SendMessage: cut when the session cannot have it (subagents text, index.ts). */
+export const GUIDE_CONTINUE = ` **IMPORTANT:** First check for a ${GUIDE_AGENT} agent that is running or just finished, and continue that one with SendMessage rather than starting another.`;
+
+export const GUIDE_DESCRIPTION = `Start this agent for questions about ${brand.name} itself ("Can ${brand.name}...", "Does ${brand.name}...", "How do I..."): its commands and settings, permission modes including auto mode, skills, subagents, hooks, plugins, MCP servers, model and provider choice, keyboard shortcuts, installing it, and fixing problems with it. Start it too when the user wants a capability ${brand.name} lacks: the agent finds a feature or setting that already covers it, or explains how to build it as a skill, an agent, a hook, an MCP server or a pi extension of their own.${GUIDE_CONTINUE}`;
 
 function installSection({ shape, method, agentDir, version }: GuideInstall): string {
     const v = version ? ` ${version}` : "";

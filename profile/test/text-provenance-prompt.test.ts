@@ -15,7 +15,7 @@ import type { PromptTier } from "../../extensions/lib/models/model-tier.ts";
 import type { DescriptionForm } from "../../extensions/lib/profile/tool-variants.ts";
 import { ALL_LIVE } from "../../test/unit/helpers/live.ts";
 import { guideInput } from "../../test/unit/helpers/guide-input.ts";
-import { type EnglishPhrases, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
+import { type EnglishPhrases, mentions, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
 import brand from "../brand.json" with { type: "json" };
 import { profile } from "../index.ts";
 
@@ -103,6 +103,17 @@ describe("the system prompt, subagent and hand-back words", () => {
 
 	it("leave out the tools of each optional feature that is off, and edit", () => {
 		expect(toolLeaks(texts, ENGLISH)).toEqual([]);
+	});
+
+	it("leave SendMessage out of the Agent tool's words and the guide agent when pi's flags take it out alone", () => {
+		// SendMessage is pinned, so only pi's --exclude-tools takes it out; deferred, it is still one the session can have.
+		const words = (live: LiveTools) => {
+			const subagents = profile.text({ live }).subagents!;
+			return [...FORMS.map((form) => subagents.agentDescription({ form, configDir: brand.stateDir })), JSON.stringify(subagents.agentParams), subagents.guideAgent?.description ?? ""].join("\n");
+		};
+		expect(mentions(words({ has: (tool) => tool !== "SendMessage" }), "SendMessage", ENGLISH)).toEqual([]);
+		// One in each form's usage notes, one in each form's closing section, the `name` parameter, the guide agent.
+		expect(mentions(words(ALL_LIVE), "SendMessage", ENGLISH)).toHaveLength(6);
 	});
 
 	it("have every passage their tables cut", () => {

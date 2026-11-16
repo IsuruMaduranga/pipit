@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import type { PromptTier } from "../../extensions/lib/models/model-tier.ts";
 import { parseFrontmatterLoosely } from "../../extensions/lib/core/frontmatter.ts";
 import type { LiveTools } from "../../extensions/sdk/profile.ts";
-import { deferralChanges, type EnglishPhrases, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
+import { deferralChanges, type EnglishPhrases, mentions, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
 import { ballerinaSection } from "../extensions/ballerina/prompt.ts";
 
 const PROFILE = join(import.meta.dirname, "..");
@@ -33,7 +33,7 @@ const ENGLISH: EnglishPhrases = {
 	// Ballerina's agent type.
 	Agent: [/`ai:Agent`/],
 	// A skill, not the tool that loads one.
-	skill: [/a loaded skill/, /`[a-z-]+` skill/],
+	skill: [/a loaded skill/],
 	// Ballerina's workflow module and the construct it builds.
 	workflow: [/ballerina\/workflow/, /Durable workflow/, /A workflow goes in/],
 	edit: [/\b(each|every|first) edit\b/, /\b[Nn]ever edit\b/, /cannot edit it/],
@@ -105,7 +105,7 @@ describe("the # Ballerina section", () => {
 
 	it("changes source files only through the file tools, naming only the file tools the session has", () => {
 		const text = render("frontier") ?? "";
-		expect(text).toContain("- Create and change `.bal` files only with `write` and `edit`, never through the shell");
+		for (const part of ["Create and change `.bal` files", "only with `write` and `edit`, never", "through the shell"]) expect(text).toContain(part);
 		expect(text).toContain("A change made through the shell gets no compiler check");
 		expect(text).toContain("- Only a change made with `write` or `edit` is checked.");
 		// The rule sits before the first edit is described, near the top.
@@ -118,13 +118,45 @@ describe("the # Ballerina section", () => {
 			expect(toolReference("edit").test(noFiles), `the ${tier} section names edit without it`).toBe(false);
 			expect(toolReference("write").test(noFiles), `the ${tier} section names write without it`).toBe(false);
 			expect(noFiles).not.toContain("Create and change `.bal` files only with");
-			// No automatic check arrives without a file tool: the text says to build instead.
-			expect(noFiles).not.toContain("arrive after each edit");
-			expect(noFiles).not.toContain("The compiler checks every edit");
-			expect(noFiles).not.toContain("let the compiler check it");
-			expect(noFiles).toContain("Run `bal build` after a change to get the compiler's errors");
-			expect(noFiles).toContain("write the code and check it with `bal build`");
 		}
+	});
+
+	it("promises a check after each edit only with a file tool and the language-server diagnostics", () => {
+		const promises = ["arrive after each edit", "The compiler checks every edit", "let the compiler check it", "no block means no new errors", "A change made through the shell gets no compiler check"];
+		const buildInstead = ["Run `bal build` after a change to get the compiler's errors", "write the code and check it with `bal build`"];
+		for (const tier of TIERS) {
+			const all = render(tier) ?? "";
+			for (const text of promises) expect(all, `${tier}: ${text}`).toContain(text);
+			// File tools on, no lsp_diagnostics: the base's lsp feature may still add the block, so the text neither promises nor denies it.
+			const unknown = render(tier, without("lsp_diagnostics")) ?? "";
+			// The rule's reason is cut, so the exception follows its list of commands directly.
+			for (const part of ["only with `write` and `edit`, never", "script that writes them. Commands that generate"]) expect(unknown).toContain(part);
+			for (const text of promises) expect(unknown, `${tier} without diagnostics: ${text}`).not.toContain(text);
+			for (const text of [...buildInstead, "Check each change to a `.bal` file with `bal build`", "When the result of a change carries a `<new-diagnostics>` block"]) expect(unknown, `${tier} without diagnostics: ${text}`).toContain(text);
+			expect(unknown).not.toContain("no check arrives on its own");
+			// No file tools: no change is checked on its own, whether or not diagnostics are live.
+			for (const off of [["write", "edit"], ["write", "edit", "lsp_diagnostics"]]) {
+				const noFiles = render(tier, without(...off)) ?? "";
+				for (const text of [...promises, "<new-diagnostics>"]) expect(noFiles, `${tier} without ${off}: ${text}`).not.toContain(text);
+				for (const text of [...buildInstead, "no check arrives on its own"]) expect(noFiles, `${tier} without ${off}: ${text}`).toContain(text);
+			}
+		}
+	});
+
+	it("names neither product tool when the session cannot have it, and says what to do instead", () => {
+		for (const tool of ["create_integration", "config_status"]) {
+			for (const tier of TIERS) expect(mentions(render(tier, without(tool)) ?? "", tool, {}), `${tier} without ${tool}`).toEqual([]);
+			expect(mentions(render("frontier") ?? "", tool, {}), tool).not.toEqual([]);
+		}
+		const noCreate = render("frontier", without("create_integration")) ?? "";
+		for (const part of ["write the layout above by hand, exactly as shown", "Never use `bal new` for a BI project", "Leave `Config.toml` to the user"]) expect(noCreate).toContain(part);
+		expect(noCreate).not.toContain("Do not write the layout by hand either");
+		const noStatus = render("frontier", without("config_status")) ?? "";
+		for (const part of ["read the `configurable` declarations in the source", "only the user can tell you", "Never ask the user for a secret value in the chat"]) expect(noStatus).toContain(part);
+	});
+
+	it("tells the model to load no skill when the skill tool is off", () => {
+		for (const tier of TIERS) expect(render(tier, without("skill")) ?? "", tier).not.toMatch(/load (it with )?the `|skill explains/);
 	});
 
 	it("starts with its one top-level heading", () => {
