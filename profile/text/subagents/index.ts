@@ -3,7 +3,9 @@
  * tool's description (agent-description.ts), the parameters of Agent,
  * SendMessage and list_agents, a subagent's own SendMessage to the main
  * conversation, the fork's framing, the tiny tier's delegation steer, the
- * guide agent (guide-agent.ts), and two clauses the base's refusals take.
+ * sentences that withdraw the delegation steer, the agent catalog and the
+ * model menu, the guide agent (guide-agent.ts), and two clauses the base's
+ * refusals take.
  */
 
 import type { LiveTools, SubagentsText } from "../../../extensions/sdk/profile.ts";
@@ -24,6 +26,15 @@ const AGENT_PASSAGES: ToolPassages = {
 /** SendMessage's pointer to list_agents: cut when list_agents is off. */
 const SEND_MESSAGE_PASSAGES: ToolPassages = {
     list_agents: ["; list_agents shows the names of running and finished agents"],
+};
+
+/** SendMessage's `to`: pi's --exclude-tools can take Agent out alone, leaving SendMessage. */
+const SEND_TO_PASSAGES: ToolPassages = { Agent: [["from an earlier Agent run", "from an agent started earlier"]] };
+
+/** list_agents' pointers to its siblings: pi's --exclude-tools can take Agent or SendMessage out alone. */
+const LIST_AGENTS_PASSAGES: ToolPassages = {
+    Agent: [" (Agent with action:'list' shows that)"],
+    SendMessage: [[", to see which ones SendMessage can reach.", "."]],
 };
 
 /** The group, for the tools this session can have (`live`): text naming a tool that is off leaves it out. */
@@ -65,12 +76,15 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
             SEND_MESSAGE_PASSAGES,
         ),
         sendMessageParams: {
-            to: "The agent's name (or task id) from an earlier Agent run",
+            to: withoutOff("The agent's name (or task id) from an earlier Agent run", live, SEND_TO_PASSAGES),
             message: "The message for the agent, as plain text",
             summary: "A 5 to 10 word preview shown in the UI",
         },
-        listAgentsDescription:
+        listAgentsDescription: withoutOff(
             "List the agents started in this session, with their names, types, and status, to see which ones SendMessage can reach. `running` means working now; `resident` means idle but reachable live; `finished` means it can be resumed from its session. This lists started runs, not the agent catalog (Agent with action:'list' shows that).",
+            live,
+            LIST_AGENTS_PASSAGES,
+        ),
         toMain: {
             description:
                 'Send progress, a finding, or a question to the main conversation while you work (to: "main"). The main conversation sees none of your plain text output until you finish, so use this for anything it should hear sooner.',
@@ -112,6 +126,9 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
             "When the agent reports, relay what it found and continue. Leave the files it searched closed, apart from one you are about to change (a change needs a fresh read of it).",
         ].join("\n"),
         delegationWithdrawn: "The delegation guidance shown earlier in this conversation no longer applies.",
+        // Sent only once the Agent tool is gone, so it names no tool.
+        catalogWithdrawn: "The agents listed earlier in this conversation can no longer be started in this session.",
+        modelsWithdrawn: "The subagent models listed earlier in this conversation no longer apply.",
         guideAgent,
     };
 };

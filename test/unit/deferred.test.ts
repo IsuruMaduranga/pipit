@@ -4,6 +4,7 @@ import {
 	DeferredRegistry,
 	deferredAddendumText,
 	deferredReminderText,
+	listingWordsFor,
 	resultText,
 	searchTools,
 	type SearchableTool,
@@ -228,6 +229,32 @@ describe("deferredReminderText", () => {
 		expect(deferredAddendumText(["monitor", "x"], words)).toBe([toolSearchResultText.addendumHead, "monitor: When you watch, use it.", "x"].join("\n"));
 	});
 
+	describe("the words for a request's model (listingWordsFor)", () => {
+		const words = { listingHints: { enter_plan_mode: "When the task is not simple, use it.", monitor: "When you watch, use it." }, listingHintsOtherModels: { enter_plan_mode: "Only when asked, use it." }, listingClose: "Close." };
+
+		it("are the profile's own, the same object, on a Claude-family model or with no model yet", () => {
+			expect(listingWordsFor(words, { provider: "anthropic", id: "claude-opus-5-5" })).toBe(words);
+			expect(listingWordsFor(words, { provider: "openrouter", id: "anthropic/claude-sonnet-5-5" })).toBe(words);
+			expect(listingWordsFor(words, undefined)).toBe(words);
+		});
+
+		it("take a tool's override on another model, and keep every other hint and the close", () => {
+			const other = listingWordsFor(words, { provider: "openai", id: "gpt-6.1-sol" });
+			expect(other.listingHints).toEqual({ enter_plan_mode: "Only when asked, use it.", monitor: "When you watch, use it." });
+			expect(other.listingClose).toBe("Close.");
+			expect(deferredReminderText([{ name: "enter_plan_mode" }, { name: "monitor" }], other)).toBe(
+				[toolSearchResultText.listingHead, "enter_plan_mode: Only when asked, use it.", "monitor: When you watch, use it.", "", "Close."].join("\n"),
+			);
+		});
+
+		it("ignore an override that is undefined, and words with no overrides", () => {
+			const gpt = { provider: "openai", id: "gpt-6.1-sol" };
+			expect(listingWordsFor({ ...words, listingHintsOtherModels: { enter_plan_mode: undefined } }, gpt).listingHints?.enter_plan_mode).toBe("When the task is not simple, use it.");
+			const plain = { listingHints: words.listingHints };
+			expect(listingWordsFor(plain, gpt)).toBe(plain);
+		});
+	});
+
 	describe("a hint from the tool's owner", () => {
 		const words = { listingHints: { monitor: "When you watch, use it." } };
 		const owner = (hints: Record<string, string>) => (name: string) => hints[name];
@@ -251,6 +278,12 @@ describe("deferredReminderText", () => {
 			const hints = owner({ late: "When you echo, use it." });
 			expect(deferredReminderText([{ name: "late" }], { listingHints: { late: "" } }, hints)).toBe([toolSearchResultText.listingHead, "late"].join("\n"));
 			expect(deferredAddendumText(["late"], { listingHints: { late: "" } }, hints)).toBe([toolSearchResultText.addendumHead, "late"].join("\n"));
+		});
+
+		it("is used for a tool whose profile entry is explicitly undefined", () => {
+			const hints = owner({ late: "When you echo, use it." });
+			expect(deferredReminderText([{ name: "late" }], { listingHints: { late: undefined } }, hints)).toBe([toolSearchResultText.listingHead, "late: When you echo, use it."].join("\n"));
+			expect(deferredAddendumText(["late"], { listingHints: { late: undefined } }, hints)).toBe([toolSearchResultText.addendumHead, "late: When you echo, use it."].join("\n"));
 		});
 
 		it("is used for a tool whose name the profile's object only inherits", () => {

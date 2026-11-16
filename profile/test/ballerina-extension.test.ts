@@ -63,7 +63,7 @@ describe("the Ballerina extension", () => {
 		const tool = fake.tools.get(CONFIG_STATUS_TOOL);
 		expect(tool?.renderShell).toBe("self");
 		expect(tool?.promptSnippet).toEqual(expect.any(String));
-		const session = { tier: "frontier" as const, taskTools: true, tools: undefined };
+		const session = { tier: "frontier" as const, taskTools: true, tools: undefined, live: { has: () => true } };
 		expect(sections.map((s) => [s.id, s.place, s.render(session)])).toEqual([[BALLERINA_SECTION_ID, "tail", ballerinaSection(session)]]);
 	});
 

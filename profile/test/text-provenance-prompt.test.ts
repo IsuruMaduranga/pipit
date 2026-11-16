@@ -49,11 +49,12 @@ function texts(live: LiveTools): NamedText[] {
 	}
 	for (const form of FORMS) push(`Agent ${form}`, "subagents", subagents.agentDescription({ form, configDir: brand.stateDir }), "Agent");
 	push("nested Agent", "subagents", subagents.nestedAgentDescription({ catalog: ["- explore: x"] }), "Agent");
-	push("SendMessage", "subagents", subagents.sendMessageDescription, "SendMessage");
+	push("SendMessage", "subagents", `${subagents.sendMessageDescription}\n${JSON.stringify(subagents.sendMessageParams)}`, "SendMessage");
 	push("list_agents", "subagents", subagents.listAgentsDescription, "list_agents");
 	push("to main", "subagents", subagents.toMain.description);
 	push("fork task", "subagents", subagents.forkTask({ task: "T", isolation: { worktreePath: "/w", parentCwd: "/p" } }));
-	push("delegation steer", "subagents", subagents.delegationSteer);
+	// The base sends the steer only while Agent is registered (extensions/agents/subagents/index.ts emitDelegationSteer), as if Agent's own words.
+	push("delegation steer", "subagents", subagents.delegationSteer, "Agent");
 	push("handback", undefined, handback.description);
 	return out;
 }

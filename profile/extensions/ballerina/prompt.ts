@@ -14,10 +14,13 @@
  * tiny tiers also get syntax skeletons: correct shapes in context to write
  * from, where a weaker model would otherwise spend compiler rounds.
  *
- * Byte-stable: a pure function of the session (its tier and its tools). No
- * dates, no file reads, no environment probing. Passages that depend on a
- * tool follow the session's tools, and only tools that stay put for the
- * session (`write`, `edit`, `Agent`), never a deferred one.
+ * Byte-stable: a pure function of the session (its tier and the tools it
+ * can have). No dates, no file reads, no environment probing. Passages that
+ * name a tool follow `live`, the tools the session can have (fixed for the
+ * process, pi's `--tools` and `--exclude-tools` included), never the active
+ * `tools`, which grow when a deferred tool loads (`lsp_diagnostics`,
+ * `task_output` and `task_stop` are deferred) and would change these bytes
+ * mid-session.
  *
  * Sources: the WSO2 Integrator Copilot's prompt (coding rules, data binding,
  * module init, concurrency, langlibs) and the earlier BI harness's reference
@@ -25,18 +28,18 @@
  * workspace), merged and checked against bal 2201.14.0.
  */
 
-import type { SystemPromptSession } from "../../../extensions/sdk/extension.ts";
-
-/** Whether the session has a tool: before pi reports the tools, every tool is assumed. */
-const has = (tools: readonly string[] | undefined, tool: string) => !tools || tools.includes(tool);
+import type { SectionSession } from "../../../extensions/sdk/extension.ts";
+import { type LiveTools, type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
 
 /**
- * The file tools the session has, of `write` and `edit`, as the text names
- * them. A passage naming them lists only those present, and is cut when
- * neither is (the live tool set rule).
+ * The file tools the session can have, of `write` and `edit`, as the text
+ * names them. A passage naming them lists only those present, and is cut
+ * when neither is. Worded per combination here rather than in `PASSAGES`:
+ * one tool off rewords the passage, both off removes it or says to build
+ * instead, which per-tool cuts cannot express.
  */
-function fileTools(tools: readonly string[] | undefined): string[] {
-	return ["write", "edit"].filter((tool) => has(tools, tool)).map((tool) => `\`${tool}\``);
+function fileTools(live: LiveTools): string[] {
+	return ["write", "edit"].filter((tool) => live.has(tool)).map((tool) => `\`${tool}\``);
 }
 
 /**
@@ -55,6 +58,9 @@ function fileToolsRule(files: string[]): string {
 	return `\n- Create and change \`.bal\` files only with ${files.join(" and ")}, never through the shell: no heredoc, \`echo\`, \`tee\`, \`sed -i\` or script that writes them. A change made through the shell gets no compiler check (see Editing files and diagnostics), and writing first and letting the compiler check (see Finding a library) depends on that check. Commands that generate or format code (\`bal format\`, \`bal openapi\`) are the exception.`;
 }
 
+/** Loading a fitting skill first; cut with the `skill` tool. */
+const SKILL_RULE = "\n- Before you start, check whether a skill fits the task and load it with the `skill` tool: `data-map` for a data mapper or any transformation between types, `agent-builder` for an `ai:Agent`, `workflow-builder` for a `ballerina/workflow` process, `connector` when the user supplies an OpenAPI spec. A skill's rules take precedence over the general rules below.";
+
 /** Terminology, layout, creating projects, the designer rules, scope. */
 const overview = (files: string[]) => `# Ballerina
 
@@ -62,8 +68,7 @@ You work on WSO2 Integrator projects (Ballerina Integrator, "BI"), written in Ba
 
 - Work in a loop: make a rough plan, write the code, then refine it with real feedback: ${compilerCheck(files).loop}. When debugging, get one signal first, then narrow down.${fileToolsRule(files)}
 - Use your own reasoning for what does not depend on Ballerina specifics: control flow, data-mapping logic, splitting a task into steps, and reading tool output or project source already in context.
-- Write library code from what you already have: this section, a loaded skill, the project's source, earlier answers in this conversation, and your own knowledge of Ballerina. ${compilerCheck(files).cost} Never invent an API and then defend it: when the compiler rejects a library name, look it up instead of trying variations.
-- Before you start, check whether a skill fits the task and load it with the \`skill\` tool: \`data-map\` for a data mapper or any transformation between types, \`agent-builder\` for an \`ai:Agent\`, \`workflow-builder\` for a \`ballerina/workflow\` process, \`connector\` when the user supplies an OpenAPI spec. A skill's rules take precedence over the general rules below.
+- Write library code from what you already have: this section, a loaded skill, the project's source, earlier answers in this conversation, and your own knowledge of Ballerina. ${compilerCheck(files).cost} Never invent an API and then defend it: when the compiler rejects a library name, look it up instead of trying variations.${SKILL_RULE}
 
 ## Terminology
 
@@ -137,30 +142,26 @@ Resolve genuine requirement gaps before implementing, with one \`ask_user_questi
 
 /**
  * When learning a library goes to the librarian, the same on every tier: once
- * three or more lookups are likely, or libraries must be compared. Keyed on
- * `Agent` only: with no `Agent` tool there is no route to state, and the
- * model looks up by the rules that follow. Never keyed on a deferred tool
- * (`SendMessage` is one): loading it mid-session would change these bytes.
+ * three or more lookups are likely, or libraries must be compared. Cut with
+ * `Agent` (`PASSAGES`): with no `Agent` tool there is no route to state, and
+ * the model looks up by the rules that follow. It never names the deferred
+ * `SendMessage`.
  */
-function librarianRoute(tools: readonly string[] | undefined): string {
-	if (!has(tools, "Agent")) return "";
-	return `\nRun a lookup yourself when you know the symbol, or when one or two commands answer the question. When learning a library is likely to take three or more lookups, or several candidate libraries must be compared, delegate it to the \`librarian\` agent with the \`Agent\` tool: its report costs your context far less than the raw answers would.\n\nWrite one brief per independent external system and start them all in the same message, so they run in parallel; keep related parts (a listener and the module that binds its payloads, a client and its auth module) in one brief. A brief says what the integration must do (systems, protocols, operations, payload shapes, constraints, whether it calls an API or listens for events), never the raw user request. Before you start one, tell the user in one short sentence what you are looking up. Wait for the report, then write the code from it: it quotes signatures from Central, so do not look them up again. What it lists as not confirmed, or does not cover, look up before you write code that depends on it. A follow-up question about the same library goes to the same librarian, not a new one: it answers from what it already read.\n`;
-}
+const LIBRARIAN_ROUTE = `\nRun a lookup yourself when you know the symbol, or when one or two commands answer the question. When learning a library is likely to take three or more lookups, or several candidate libraries must be compared, delegate it to the \`librarian\` agent with the \`Agent\` tool: its report costs your context far less than the raw answers would.\n\nWrite one brief per independent external system and start them all in the same message, so they run in parallel; keep related parts (a listener and the module that binds its payloads, a client and its auth module) in one brief. A brief says what the integration must do (systems, protocols, operations, payload shapes, constraints, whether it calls an API or listens for events), never the raw user request. Before you start one, tell the user in one short sentence what you are looking up. Wait for the report, then write the code from it: it quotes signatures from Central, so do not look them up again. What it lists as not confirmed, or does not cover, look up before you write code that depends on it. A follow-up question about the same library goes to the same librarian, not a new one: it answers from what it already read.\n`;
 
 /** When to look a library up, which route a lookup takes, and how to keep each one small. */
-function findingALibrary(tools: readonly string[] | undefined, files: string[]): string {
-	const librarian = has(tools, "Agent");
+function findingALibrary(files: string[]): string {
 	return `## Finding a library
 
-Library facts come from Ballerina Central, through the shell. Look something up only when you can name the gap${librarian ? ", and know which of two kinds it is" : ""}:
+Library facts come from Ballerina Central, through the shell. Look something up only when you can name the gap, and know which of two kinds it is:
 - Learning a library: a library or connector you have not written code for, or whose constructor, config record, listener or methods you cannot recall exactly, so you must look it up before you can write against it.
 - One named symbol: a library symbol the compiler rejected (\`undefined\`, \`incompatible types\`, a missing or unknown argument) where the error does not show the fix, or one behavior the compiler cannot see (a default value, whether matching is case-sensitive, what a validator checks). One command answers it.
 
-Neither kind applies to what you already have: it needs no lookup${librarian ? " and no librarian" : ""}. Never look up:
+Neither kind applies to what you already have: it needs no lookup and no librarian. Never look up:
 - a shape this section or a loaded skill shows: they are checked against the installed distribution, so write them as shown;
 - anything an earlier answer or report in this conversation already printed;
 - a library you know well, only to confirm it before writing: ${compilerCheck(files).confirm}.
-${librarianRoute(tools)}
+${LIBRARIAN_ROUTE}
 How to look up:
 - Ask one question per command, and go straight to the symbol when you know its name.
 - When you do not know a symbol's exact name, search inside its package (\`bal discover search "<keyword>" -p <org>/<name> --output-format text\`) instead of guessing names. Each command takes one name.
@@ -602,17 +603,30 @@ function fetchOrders() returns Order[]|error {     // block body: a plain functi
 }
 \`\`\``;
 
-function core(tools: readonly string[] | undefined): string {
-	const files = fileTools(tools);
-	return [overview(files), findingALibrary(tools, files), IMPORTS, CODE_RULES, DOMAINS, LANGLIBS, running(files)].join("\n\n");
+/**
+ * Per tool, the passages that name it, cut (or reworded) when the session
+ * cannot have it. The file tools are worded by `fileTools`.
+ */
+const PASSAGES: ToolPassages = {
+	skill: [SKILL_RULE],
+	Agent: [", and know which of two kinds it is", " and no librarian", LIBRARIAN_ROUTE],
+	ask_user_question: [[", with one \`ask_user_question\` call that batches every question.", ", asking every question in one message."]],
+	lsp_diagnostics: [" \`lsp_diagnostics\` gives a file's full current list on demand."],
+	task_output: [', read its output with \`task_output\` ("Running executable" with no error after it means it started)'],
+	task_stop: [" Stop it with \`task_stop\` before restarting it after code changes, or when the user asks."],
+};
+
+function core(live: LiveTools): string {
+	const files = fileTools(live);
+	return withoutOff([overview(files), findingALibrary(files), IMPORTS, CODE_RULES, DOMAINS, LANGLIBS, running(files)].join("\n\n"), live, PASSAGES);
 }
 
 /**
  * The section for the session: every tier carries the full knowledge, and
- * cheap and tiny add the syntax skeletons; the session's tools decide how
- * the passages that name a tool read.
+ * cheap and tiny add the syntax skeletons; the tools the session can have
+ * (`live`) decide how the passages that name a tool read.
  */
-export function ballerinaSection(session: SystemPromptSession): string | undefined {
-	const text = core(session.tools);
+export function ballerinaSection(session: SectionSession): string | undefined {
+	const text = core(session.live);
 	return session.tier === "cheap" || session.tier === "tiny" ? `${text}\n\n${SYNTAX_SKELETONS}` : text;
 }

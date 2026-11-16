@@ -1,10 +1,11 @@
 /**
  * The Ballerina knowledge layer: the `# Ballerina` system-prompt section
  * (profile/extensions/ballerina/prompt.ts), the `librarian` agent and the
- * Ballerina skills. The section is a pure function of the tier, carries the
- * full domain knowledge on every tier, and none of the text names a tool the
- * product does not have (the earlier BI harness's and the VS Code Copilot's
- * tools are gone; library lookup is the shell).
+ * Ballerina skills. The section is a pure function of the tier and the tools
+ * the session can have, carries the full domain knowledge on every tier, and
+ * none of the text names a tool the product does not have (the earlier BI
+ * harness's and the VS Code Copilot's tools are gone; library lookup is the
+ * shell) or a tool the session lacks.
  */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,6 +13,8 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { PromptTier } from "../../extensions/lib/models/model-tier.ts";
 import { parseFrontmatterLoosely } from "../../extensions/lib/core/frontmatter.ts";
+import type { LiveTools } from "../../extensions/sdk/profile.ts";
+import { deferralChanges, type EnglishPhrases, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
 import { ballerinaSection } from "../extensions/ballerina/prompt.ts";
 
 const PROFILE = join(import.meta.dirname, "..");
@@ -20,7 +23,24 @@ const SKILLS = ["data-map", "agent-builder", "workflow-builder", "skill-creator"
 const AGENTS = ["librarian"];
 const BUNDLED_AGENTS = ["explore", "general-purpose", "plan", "librarian"];
 
-const render = (tier: PromptTier, tools?: readonly string[]) => ballerinaSection({ tier, taskTools: true, tools });
+const ALL: LiveTools = { has: () => true };
+/** A session that can have every tool but these. */
+const without = (...off: string[]): LiveTools => ({ has: (tool) => !off.includes(tool) });
+const render = (tier: PromptTier, live: LiveTools = ALL, tools?: readonly string[]) => ballerinaSection({ tier, taskTools: true, tools, live });
+
+/** Phrases where a tool's name is an English word, a skill or a Ballerina name, not the tool. */
+const ENGLISH: EnglishPhrases = {
+	// Ballerina's agent type.
+	Agent: [/`ai:Agent`/],
+	// A skill, not the tool that loads one.
+	skill: [/a loaded skill/, /`[a-z-]+` skill/],
+	// Ballerina's workflow module and the construct it builds.
+	workflow: [/ballerina\/workflow/, /Durable workflow/, /A workflow goes in/],
+	edit: [/\b(each|every|first) edit\b/, /\b[Nn]ever edit\b/, /cannot edit it/],
+};
+
+/** The section on every tier, for the tool-set checks. */
+const sectionTexts = (live: LiveTools): NamedText[] => TIERS.map((tier) => [`${tier} section`, undefined, render(tier, live) ?? ""]);
 
 /** Tools of the earlier BI harness and of the VS Code Copilot that this product does not have. */
 const REMOVED_TOOLS = [
@@ -60,17 +80,27 @@ const EM_DASH = String.fromCharCode(0x2014);
 const headings = (text: string) => text.split("\n").filter((line) => line.startsWith("## "));
 
 describe("the # Ballerina section", () => {
-	it("renders the same bytes twice for every tier, whatever else the session holds", () => {
+	it("renders the same bytes twice for every tier, whatever the active tools are", () => {
 		for (const tier of TIERS) {
 			const first = render(tier);
 			expect(first).toBeDefined();
 			expect(render(tier)).toBe(first);
-			// Before pi reports the tools, every tool is assumed.
-			expect(render(tier, ["read", "bash", "edit", "write", "Agent", "config_status"])).toBe(first);
-			expect(ballerinaSection({ tier, taskTools: false, tools: ["read", "write", "edit", "Agent"] })).toBe(first);
-			// A deferred tool loaded mid-session (SendMessage, lsp_diagnostics, task_output) changes nothing.
-			expect(render(tier, ["read", "bash", "edit", "write", "Agent", "SendMessage", "lsp_diagnostics", "task_output"])).toBe(first);
+			// The active tools never matter: only the tools the session can have do.
+			expect(render(tier, ALL, ["read", "bash", "edit", "write", "Agent", "config_status"])).toBe(first);
+			expect(ballerinaSection({ tier, taskTools: false, tools: ["read"], live: ALL })).toBe(first);
 		}
+	});
+
+	it("stays the same when a deferred tool loads", () => {
+		expect(deferralChanges((session) => ballerinaSection(session))).toEqual([]);
+	});
+
+	it("names no tool the session cannot have", () => {
+		expect(toolLeaks(sectionTexts, ENGLISH)).toEqual([]);
+	});
+
+	it("has every passage its table cuts", () => {
+		expect(stalePassages(sectionTexts)).toEqual([]);
 	});
 
 	it("changes source files only through the file tools, naming only the file tools the session has", () => {
@@ -80,20 +110,20 @@ describe("the # Ballerina section", () => {
 		expect(text).toContain("- Only a change made with `write` or `edit` is checked.");
 		// The rule sits before the first edit is described, near the top.
 		expect(text.indexOf("Create and change `.bal` files only with")).toBeLessThan(text.indexOf("## Terminology"));
-		expect(render("frontier", ["bash", "write"])).toContain("only with `write`, never");
-		expect(render("frontier", ["bash", "write"])).toContain("Only a change made with `write` is checked");
-		expect(render("frontier", ["bash", "edit"])).toContain("only with `edit`, never");
+		expect(render("frontier", without("edit"))).toContain("only with `write`, never");
+		expect(render("frontier", without("edit"))).toContain("Only a change made with `write` is checked");
+		expect(render("frontier", without("write"))).toContain("only with `edit`, never");
 		for (const tier of TIERS) {
-			const without = render(tier, ["read", "bash"]) ?? "";
-			expect(toolReference("edit").test(without), `the ${tier} section names edit without it`).toBe(false);
-			expect(toolReference("write").test(without), `the ${tier} section names write without it`).toBe(false);
-			expect(without).not.toContain("Create and change `.bal` files only with");
+			const noFiles = render(tier, without("write", "edit")) ?? "";
+			expect(toolReference("edit").test(noFiles), `the ${tier} section names edit without it`).toBe(false);
+			expect(toolReference("write").test(noFiles), `the ${tier} section names write without it`).toBe(false);
+			expect(noFiles).not.toContain("Create and change `.bal` files only with");
 			// No automatic check arrives without a file tool: the text says to build instead.
-			expect(without).not.toContain("arrive after each edit");
-			expect(without).not.toContain("The compiler checks every edit");
-			expect(without).not.toContain("let the compiler check it");
-			expect(without).toContain("Run `bal build` after a change to get the compiler's errors");
-			expect(without).toContain("write the code and check it with `bal build`");
+			expect(noFiles).not.toContain("arrive after each edit");
+			expect(noFiles).not.toContain("The compiler checks every edit");
+			expect(noFiles).not.toContain("let the compiler check it");
+			expect(noFiles).toContain("Run `bal build` after a change to get the compiler's errors");
+			expect(noFiles).toContain("write the code and check it with `bal build`");
 		}
 	});
 
@@ -160,7 +190,8 @@ describe("the # Ballerina section", () => {
 		for (const tier of TIERS) {
 			expect(render(tier)).toContain("`Agent` tool");
 			expect(toolReference("SendMessage").test(render(tier) ?? ""), `${tier} names SendMessage`).toBe(false);
-			const noAgent = render(tier, ["read", "bash", "edit", "write"]) ?? "";
+			// pi's --exclude-tools Agent takes it out alone, and the route with it.
+			const noAgent = render(tier, without("Agent")) ?? "";
 			expect(toolReference("Agent").test(noAgent), `${tier} names Agent without it`).toBe(false);
 			expect(/librarian/i.test(noAgent), `${tier} mentions the librarian without Agent`).toBe(false);
 			expect(noAgent).not.toContain("two kinds");
@@ -273,9 +304,7 @@ describe("the librarian agent", () => {
 	});
 
 	it("every bundled agent declares model: inherit", () => {
-		// `inherit` becomes the session model with One Code commit 2c0ddd93; on the
-		// current base it is read as no model, which gives the automatic
-		// same-provider pick (working-docs/findings/03-base-harness/agent-model.md).
+		// `inherit` runs the agent on the session model (since the base at fb0c1c3a).
 		// Loose parsing: explore's description holds a colon followed by a space.
 		for (const agent of BUNDLED_AGENTS) {
 			const { frontmatter } = parseFrontmatterLoosely(readFileSync(join(PROFILE, "agents", `${agent}.md`), "utf8"));
