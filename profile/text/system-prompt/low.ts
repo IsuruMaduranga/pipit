@@ -47,7 +47,7 @@ First work out what kind of request this is:
 - An ambiguous request that might be a question or a task: assume it is a task and do it.
 Begin without asking whether you may. Stop to ask only when you are genuinely stuck without the user's answer, or before one of the risky actions that "Executing actions with care" lists.`;
 
-const LOW_TASK_LINE = ` - For work with several steps, keep a task list. The task tools are deferred: run \`tool_search select:task_create,task_update\` first, then add tasks with \`task_create\` and update them as you go.`;
+const LOW_TASK_LINE = ` - Keep a task list only when the user asks for one or the work is long enough to lose track of; do ordinary work directly. The task tools are deferred: run \`tool_search select:task_create,task_update\` first, then add tasks with \`task_create\` and update them as you go.`;
 
 /** Built with or without the task bullet: the session model may run without the task tools. */
 const usingTools = (taskTools: boolean) => `# Using your tools

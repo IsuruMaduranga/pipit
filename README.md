@@ -75,6 +75,37 @@ node profile/extensions/ballerina/visualize/build-bundle.mjs ~/wso2/integrator/b
 The script reads the checkout and changes nothing in it. It records the
 commits it built from in `bundle/build.json`.
 
+## Settings and defaults
+
+Pipit reads its own settings from `~/.pipit/settings.json`. A setting marked
+"per project" can also be set for one project in
+`~/.pipit/projects/<project>/settings.json`, where `<project>` is the project's
+folder (the git repository root, or the working folder outside one) with every
+character other than a letter, digit or hyphen replaced by a hyphen, such as
+`-Users-me-work-orders`. The project file wins over the user file. Neither
+file is read from inside a repository, so a repository cannot change them.
+
+| Setting | Type | What it does |
+|---|---|---|
+| `tierNotice` | boolean, per project | Set it to `false` to hide the warning shown when the session model is rated below the models Pipit works best with. A model whose rating the harness can only guess, such as one on a custom provider, gets no warning. |
+| `reasoningNotice` | boolean, per project | Set it to `false` to hide the warning shown, once per session, when you raise the thinking level above `low`. |
+
+Both notices appear in the interactive terminal and to an RPC client, never in
+a one-shot run (`-p`, or `--mode` set to `print` or `json`).
+
+Every model starts at the `low` thinking level, because integration tasks
+rarely need more and a higher level is slower and costs more. A level you
+saved, a level you pass with `--thinking`, and a level you pick in the session
+with `/effort` or shift+tab all win over this default. On a model that has no
+`low`, the harness runs the nearest level the model has above it.
+
+On OpenRouter, requests for DeepSeek and Qwen models are limited to hosts that
+serve the model at 8-bit precision or better (`fp8`, `bf16`, `fp16`, `fp32`,
+or a host that does not say). Lower-precision hosts were seen to make a
+session lose track of its own steps. A routing entry for the model in your `~/.pipit/agent/models.json` that sets
+`quantizations`, `only` or `order` replaces this limit, and setting
+`PIPIT_OPENROUTER_ROUTING_DEFAULTS=0` turns it off for every model.
+
 ## Check a change
 
 ```bash

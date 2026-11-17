@@ -2,7 +2,8 @@
  * The Ballerina knowledge layer: the `# Ballerina` system-prompt section
  * (profile/extensions/ballerina/prompt.ts and its templates under prompt/),
  * the `librarian` agent and the Ballerina skills. The section is a pure
- * function of the tools the session can have, the same text on every tier,
+ * function of the tools the session can have and the features that run in
+ * it, the same text on every tier,
  * and none of the text names a tool the product does not have (the earlier
  * BI harness's and the VS Code Copilot's tools are gone; library lookup is
  * the shell) or a tool the session lacks.
@@ -13,12 +14,15 @@ import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { PromptTier } from "../../extensions/lib/models/model-tier.ts";
 import { parseFrontmatterLoosely } from "../../extensions/lib/core/frontmatter.ts";
+import type { LiveFeatures } from "../../extensions/sdk/extension.ts";
 import type { LiveTools } from "../../extensions/sdk/profile.ts";
 import { TOOL_FEATURES } from "../../extensions/lib/profile/features.ts";
 import { deferralChanges, type EnglishPhrases, mentions, type NamedText, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
-import { ballerinaSection, SECTION_TOOLS, SECTION_VALUES, TEMPLATES, valuesFor } from "../extensions/ballerina/prompt.ts";
+import { COMPILE_ERRORS } from "../extensions/ballerina/fix-hints.ts";
+import { ballerinaSection, SECTION_FEATURES, SECTION_TOOLS, SECTION_VALUES, TEMPLATES, valuesFor } from "../extensions/ballerina/prompt.ts";
 import { CONFIG_STATUS_TOOL, CREATE_INTEGRATION_TOOL } from "../extensions/ballerina/session.ts";
-import { blockTools } from "./block-tools.ts";
+import { blockFeatures, blockTools } from "./block-tools.ts";
+import { EM_DASH } from "./em-dash.ts";
 
 const PROFILE = join(import.meta.dirname, "..");
 const TIERS: PromptTier[] = ["frontier", "workhorse", "cheap", "tiny"];
@@ -27,10 +31,14 @@ const AGENTS = ["librarian"];
 const BUNDLED_AGENTS = ["explore", "general-purpose", "plan", "librarian"];
 
 const ALL: LiveTools = { has: () => true };
+/** Every feature runs. */
+const ALL_FEATURES: LiveFeatures = { has: () => true };
+/** Every feature but the base's `lsp`: no language server checks an edit, and no hint arrives. */
+const NO_LSP: LiveFeatures = { has: (feature) => feature !== "lsp" };
 /** A session that can have every tool but these. */
 const without = (...off: string[]): LiveTools => ({ has: (tool) => !off.includes(tool) });
 /** The section is the same on every tier (the first test checks it), so the helper renders for one. */
-const render = (live: LiveTools = ALL) => ballerinaSection({ tier: "frontier", taskTools: true, tools: undefined, live });
+const render = (live: LiveTools = ALL, features: LiveFeatures = ALL_FEATURES) => ballerinaSection({ tier: "frontier", taskTools: true, tools: undefined, live, features });
 
 /** Phrases where a tool's name is an English word, a skill or a Ballerina name, not the tool. */
 const ENGLISH: EnglishPhrases = {
@@ -79,8 +87,6 @@ function expectNoForeignTools(label: string, text: string) {
 	for (const name of ABSENT_TOOLS) expect(toolReference(name).test(text), `${label} names the ${name} tool`).toBe(false);
 }
 
-const EM_DASH = String.fromCharCode(0x2014);
-
 const headings = (text: string) => text.split("\n").filter((line) => line.startsWith("## "));
 
 describe("the # Ballerina section", () => {
@@ -89,16 +95,19 @@ describe("the # Ballerina section", () => {
 		expect(first).toBeDefined();
 		const noFiles = without("write", "edit");
 		for (const tier of TIERS) {
-			expect(ballerinaSection({ tier, taskTools: true, tools: undefined, live: ALL })).toBe(first);
+			expect(ballerinaSection({ tier, taskTools: true, tools: undefined, live: ALL, features: ALL_FEATURES })).toBe(first);
 			// The active tools never matter: only the tools the session can have do.
-			expect(ballerinaSection({ tier, taskTools: true, tools: ["read", "bash", "edit", "write", "Agent", "config_status"], live: ALL })).toBe(first);
-			expect(ballerinaSection({ tier, taskTools: false, tools: ["read"], live: ALL })).toBe(first);
-			expect(ballerinaSection({ tier, taskTools: true, tools: undefined, live: noFiles })).toBe(render(noFiles));
+			expect(ballerinaSection({ tier, taskTools: true, tools: ["read", "bash", "edit", "write", "Agent", "config_status"], live: ALL, features: ALL_FEATURES })).toBe(first);
+			expect(ballerinaSection({ tier, taskTools: false, tools: ["read"], live: ALL, features: ALL_FEATURES })).toBe(first);
+			expect(ballerinaSection({ tier, taskTools: true, tools: undefined, live: noFiles, features: ALL_FEATURES })).toBe(render(noFiles));
+			expect(ballerinaSection({ tier, taskTools: true, tools: undefined, live: ALL, features: NO_LSP })).toBe(render(ALL, NO_LSP));
 		}
+		expect(render(ALL, NO_LSP)).not.toBe(first);
 	});
 
 	it("stays the same when a deferred tool loads", () => {
 		expect(deferralChanges((session) => ballerinaSection(session))).toEqual([]);
+		expect(deferralChanges((session) => ballerinaSection(session), { features: NO_LSP })).toEqual([]);
 	});
 
 	it("names no tool the session cannot have", () => {
@@ -112,21 +121,26 @@ describe("the # Ballerina section", () => {
 		// Every declared tool has a passage, so the list stays the set the text follows.
 		expect([...named].sort()).toEqual([...SECTION_TOOLS].sort());
 		expect(SECTION_TOOLS.has("SendMessage")).toBe(false);
+		// Every declared feature has a passage too.
+		expect([...new Set(TEMPLATES.flatMap((template) => [...blockFeatures(template)]))].sort()).toEqual([...SECTION_FEATURES].sort());
 	});
 
 	it("computes each value from the tools the session can have, never naming one it lacks", () => {
-		expect(valuesFor(ALL)).toEqual({ fileTools: "`write` and `edit`", anyFileTool: "`write` or `edit`" });
-		expect(valuesFor(without("edit"))).toEqual({ fileTools: "`write`", anyFileTool: "`write`" });
-		expect(valuesFor(without("write"))).toEqual({ fileTools: "`edit`", anyFileTool: "`edit`" });
-		expect(valuesFor(without("write", "edit"))).toEqual({ fileTools: "", anyFileTool: "" });
-		expect([...SECTION_VALUES].sort()).toEqual(["anyFileTool", "fileTools"]);
+		expect(valuesFor(ALL)).toMatchObject({ fileTools: "`write` and `edit`", anyFileTool: "`write` or `edit`" });
+		expect(valuesFor(without("edit"))).toMatchObject({ fileTools: "`write`", anyFileTool: "`write`" });
+		expect(valuesFor(without("write"))).toMatchObject({ fileTools: "`edit`", anyFileTool: "`edit`" });
+		expect(valuesFor(without("write", "edit"))).toMatchObject({ fileTools: "", anyFileTool: "" });
+		// The Common errors bullets name no tool and are the same for every session.
+		const { generalErrors, isolationErrors } = valuesFor(ALL);
+		expect(valuesFor(without(...SECTION_TOOLS))).toMatchObject({ generalErrors, isolationErrors });
+		expect([...SECTION_VALUES].sort()).toEqual(["anyFileTool", "fileTools", "generalErrors", "isolationErrors"]);
 	});
 
 	it("reads cleanly with any one tool off, and with the file tools and diagnostics off together", () => {
 		const cases = [[], ...[...SECTION_TOOLS].map((tool) => [tool]), ["write", "edit"], ["write", "edit", "lsp_diagnostics"], ["write", "edit", "skill"], ["task_output", "task_stop"], [...SECTION_TOOLS]];
-		for (const off of cases) {
-			const text = render(without(...off)) ?? "";
-			const label = `off: ${off.join(", ") || "nothing"}`;
+		for (const [off, features] of cases.flatMap((off) => [[off, ALL_FEATURES] as const, [off, NO_LSP] as const])) {
+			const text = render(without(...off), features) ?? "";
+			const label = `off: ${off.join(", ") || "nothing"}${features === NO_LSP ? ", the lsp feature" : ""}`;
 			expect(text.includes("\n\n\n"), `${label}: a doubled blank line`).toBe(false);
 			expect(/^\s*-\s*$/m.test(text), `${label}: an empty bullet`).toBe(false);
 			expect(/ \n|\n$|^\s/.test(text), `${label}: stray whitespace`).toBe(false);
@@ -150,24 +164,76 @@ describe("the # Ballerina section", () => {
 		expect(noFiles).not.toContain("Create and change `.bal` files only with");
 	});
 
-	it("promises a check after each edit only with a file tool and the language-server diagnostics", () => {
+	it("promises a check after each edit exactly when a file tool and the language server's feature are both on", () => {
 		const promises = ["the compiler errors that arrive after each edit", "The compiler checks every edit", "write the code and let the compiler check it", "no block means no new errors", "A change made through the shell gets no compiler check"];
 		const buildInstead = ["Run `bal build` after a change to get the compiler's errors", "write the code and check it with `bal build`"];
 		const all = render() ?? "";
 		for (const text of promises) expect(all, text).toContain(text);
-		// File tools on, no lsp_diagnostics: the base's lsp feature may still add the block, so the text neither promises nor denies it.
-		const unknown = render(without("lsp_diagnostics")) ?? "";
-		// The rule's reason is cut, so the exception follows its list of commands directly.
-		for (const part of ["only with `write` and `edit`, never", "script that writes them. Commands that generate"]) expect(unknown).toContain(part);
-		for (const text of promises) expect(unknown, `without diagnostics: ${text}`).not.toContain(text);
-		for (const text of [...buildInstead, "Check each change to a `.bal` file with `bal build`", "When the result of a change carries a `<new-diagnostics>` block"]) expect(unknown, `without diagnostics: ${text}`).toContain(text);
-		expect(unknown).not.toContain("no check arrives on its own");
-		// No file tools: no change is checked on its own, whether or not diagnostics are live.
-		for (const off of [["write", "edit"], ["write", "edit", "lsp_diagnostics"]]) {
-			const noFiles = render(without(...off)) ?? "";
-			for (const text of [...promises, "<new-diagnostics>"]) expect(noFiles, `without ${off}: ${text}`).not.toContain(text);
-			for (const text of [...buildInstead, "no check arrives on its own"]) expect(noFiles, `without ${off}: ${text}`).toContain(text);
+		for (const text of buildInstead) expect(all, text).not.toContain(text);
+		// The lsp feature adds the block whether or not its own tool is live, so the promise stands without lsp_diagnostics.
+		const noTool = render(without("lsp_diagnostics")) ?? "";
+		for (const text of promises) expect(noTool, `without lsp_diagnostics: ${text}`).toContain(text);
+		expect(noTool).not.toContain("`lsp_diagnostics`");
+		// Without the feature no block ever arrives: the text sends the model to `bal build` and never names the block.
+		for (const off of [[], ["lsp_diagnostics"]]) {
+			const noLsp = render(without(...off), NO_LSP) ?? "";
+			const label = `without the lsp feature${off.length ? " and its tool" : ""}`;
+			// The rule's reason is cut, so the exception follows its list of commands directly.
+			for (const part of ["only with `write` and `edit`, never", "script that writes them. Commands that generate"]) expect(noLsp, label).toContain(part);
+			for (const text of [...promises, "<new-diagnostics>"]) expect(noLsp, `${label}: ${text}`).not.toContain(text);
+			for (const text of [...buildInstead, "- Check each change to a `.bal` file with `bal build`.\n"]) expect(noLsp, `${label}: ${text}`).toContain(text);
+			expect(noLsp).not.toContain("no check arrives on its own");
 		}
+		// No file tools: no change is checked on its own, whatever runs.
+		for (const features of [ALL_FEATURES, NO_LSP]) {
+			for (const off of [["write", "edit"], ["write", "edit", "lsp_diagnostics"]]) {
+				const noFiles = render(without(...off), features) ?? "";
+				for (const text of [...promises, "<new-diagnostics>"]) expect(noFiles, `without ${off}: ${text}`).not.toContain(text);
+				for (const text of [...buildInstead, "no check arrives on its own"]) expect(noFiles, `without ${off}: ${text}`).toContain(text);
+			}
+		}
+	});
+
+	it("lists the compile-time errors in every session, and says the language server's hints repeat them when those arrive", () => {
+		const sentence = "When the language server reports one of the compiler errors below, the `Fix hints:` list after its errors repeats the advice at the error; follow it.";
+		const crash = "- `Oh no, something really went wrong` with a JVM stack trace: a compiler crash, not your code's error; reduce the change that triggers it and tell the user.";
+		const lead = "Isolation and lock errors (the rules are in Concurrency safety and shared state):";
+		const qualifier = "- `'isolated' qualifier not allowed`: on a module variable, add an initializer (`isolated int[] requests = [];`); on a local variable or a parameter, remove `isolated`.";
+		// Every row's bullet, as the section words it: the hint after its message, first letter lowered.
+		const bullets = COMPILE_ERRORS.map(({ hint }) => `: ${hint[0].toLowerCase()}${hint.slice(1)}`);
+		const commonErrors = (text: string) => text.slice(text.indexOf("## Common errors"), text.indexOf("\n\n## Syntax skeletons"));
+		const cases = [
+			[[], ALL_FEATURES, true],
+			[["lsp_diagnostics"], ALL_FEATURES, true],
+			[["write", "edit"], ALL_FEATURES, true],
+			[["write", "edit", "lsp_diagnostics"], ALL_FEATURES, false],
+			[[], NO_LSP, false],
+			[["lsp_diagnostics"], NO_LSP, false],
+		] as const;
+		for (const [off, features, hinted] of cases) {
+			const text = commonErrors(render(without(...off), features) ?? "");
+			const label = `off: ${off.join(", ") || "nothing"}${features === NO_LSP ? ", the lsp feature" : ""}`;
+			// The sentence leads only when the server's errors, and so its hints, reach the model.
+			expect(text.startsWith(`## Common errors\n\n${sentence}\n\n- \`incompatible types: expected 'X', found 'Y'\`: compare`), label).toBe(hinted);
+			if (!hinted) expect(text, label).toMatch(/^## Common errors\n\n- `incompatible types/);
+			expect(text.includes("Fix hints"), label).toBe(hinted);
+			// The general errors run on into the run-time ones, and the isolation group closes the part.
+			expect(text, label).toContain(`found 'Y'\``);
+			expect(text, label).toContain(`(\`'limit\`) or rename it.\n- \`{ballerina}TypeCastError\` at run time:`);
+			expect(text, label).toContain(`${crash}\n\n${lead}\n- \`invalid access of mutable storage in an 'isolated' function\`: make a module variable`);
+			expect(text, label).toContain(
+				"- `cannot use an async call inside a lock statement`, `using send action within the lock statement is not allowed` or `using receive action within the lock statement is not allowed`: copy what you need",
+			);
+			for (const bullet of bullets) expect(text, `${label}: ${bullet}`).toContain(bullet);
+			expect(text.endsWith(qualifier), label).toBe(true);
+		}
+	});
+
+	it("points a fix hint only at a part of the section that is there when hints are", () => {
+		const text = render() ?? "";
+		const pointers = COMPILE_ERRORS.flatMap(({ hint }) => [...hint.matchAll(/\(see ([^)]+)\)/g)].map((match) => match[1]));
+		expect(pointers.length).toBeGreaterThan(0);
+		for (const heading of pointers) expect(headings(text), heading).toContain(`## ${heading}`);
 	});
 
 	it("names neither product tool when the session cannot have it, and says what to do instead", () => {
@@ -236,7 +302,10 @@ describe("the # Ballerina section", () => {
 		// One rule for a rejected library symbol, wherever it is stated.
 		expect(text).toContain("When the compiler rejects a library symbol and the error shows the fix, apply it; when it does not, look the symbol up. Never try a second guessed name.");
 		expect(text).toContain("When the error shows the fix, apply it; when it does not, look the symbol up, and never try a second guessed name.");
-		expect(text).toContain("When the name is a library's and the error does not show the right one, look it up (see When to look a library up); never try a second guessed name.");
+		// Without hints the line for an undefined name says it; with them, the hint for its code does (the same text).
+		expect(render(ALL, NO_LSP)).toContain(
+			"- `undefined symbol 'X'` or `undefined module 'x'`: add the missing `import`, or fix the name. For a library's name the error does not correct, look it up (see When to look a library up); never try a second guessed name.",
+		);
 		expect(text).not.toContain("one short error and one fix");
 		expect(text).toContain("A shape that this section or a loaded skill shows was checked on the installed distribution: it is not a memory to doubt, so write it as shown, without looking it up.");
 		// What the model already has comes before the reasons to look something up.

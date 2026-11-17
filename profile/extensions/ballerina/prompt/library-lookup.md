@@ -1,10 +1,10 @@
 ## When to look a library up
 
-There are two ways to get a library fact right: {{#tool write|edit lsp_diagnostics}}write the code and let the compiler check it{{else}}write the code and check it with `bal build`{{/tool}}, or look the fact up before you write. Take the cheaper one each time.
+There are two ways to get a library fact right: {{#tool write|edit feature:lsp}}write the code and let the compiler check it{{else}}write the code and check it with `bal build`{{/tool}}, or look the fact up before you write. Take the cheaper one each time.
 
 What you already have needs no lookup{{#tool Agent}} and no librarian{{/tool}}. A shape that this section or a loaded skill shows was checked on the installed distribution: it is not a memory to doubt, so write it as shown, without looking it up. An answer or report from earlier in this conversation still holds.
 
-- Write first when you remember the fact clearly and the compiler can check it: a function or type name, a parameter's type, an argument. {{#tool write|edit lsp_diagnostics}}The compiler checks every edit, so a wrong name or signature costs one short error.{{else}}Run `bal build` after a change to get the compiler's errors: a wrong name or signature costs one short error.{{/tool}} When the error shows the fix, apply it; when it does not, look the symbol up, and never try a second guessed name.
+- Write first when you remember the fact clearly and the compiler can check it: a function or type name, a parameter's type, an argument. {{#tool write|edit feature:lsp}}The compiler checks every edit, so a wrong name or signature costs one short error.{{else}}Run `bal build` after a change to get the compiler's errors: a wrong name or signature costs one short error.{{/tool}} When the error shows the fix, apply it; when it does not, look the symbol up, and never try a second guessed name.
 - Look it up first when you are not sure of your memory:
   - a library or connector whose constructor and calls you cannot write down straight away;
   - a library symbol the compiler rejected (`undefined`, `incompatible types`, a missing or unknown argument) where the error does not show the fix;

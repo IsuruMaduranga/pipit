@@ -33,7 +33,7 @@ const DESCRIPTION_PASSAGES: ToolPassages = {
  * first; the line ties the tool to the step it is for.
  */
 const LISTING_HINTS: Readonly<Record<string, string>> = {
-	task_create: "Load it before work of three or more steps, or a list of requests, to keep a to-do list the user can follow.",
+	task_create: "Load it when the user asks for a to-do list, or when the work is long enough that the user would lose track of it without one. Ordinary work with a few steps does not need it.",
 	task_update: "Load it to mark a to-do item started or done, or to change or link one.",
 	task_get: "Load it to read one to-do item in full, with the items it blocks or waits on.",
 	task_list: "Load it to see the whole to-do list and what is still open.",

@@ -16,6 +16,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sharedStateDir } from "../../../extensions/sdk/profile.ts";
+import { BALLERINA_FIX_HINTS, type BallerinaFixHints } from "./fix-hints.ts";
 
 export interface JarPin {
 	/** The BI extension release that carries the jar. */
@@ -74,11 +75,13 @@ export interface LanguageServerDeclaration {
 	extensions: Record<string, string>;
 	rootMarkers: string[];
 	startupTimeoutMs: number;
+	/** The advice the base adds after the compiler errors it shows (fix-hints.ts). */
+	fixHints: BallerinaFixHints;
 }
 
 /** The profile's `ballerina` language server on `platform`. */
 export function ballerinaLanguageServer(platform: NodeJS.Platform = process.platform, jar: string = jarPath()): LanguageServerDeclaration {
-	const routing = { extensions: { ".bal": "ballerina" }, rootMarkers: ["Ballerina.toml"], startupTimeoutMs: 60_000 };
+	const routing = { extensions: { ".bal": "ballerina" }, rootMarkers: ["Ballerina.toml"], startupTimeoutMs: 60_000, fixHints: BALLERINA_FIX_HINTS };
 	if (platform === "win32") return { command: "bal", args: ["start-language-server"], ...routing };
 	return { command: "sh", args: [LAUNCHER_PATH, ...launcherArgs(jar)], ...routing };
 }

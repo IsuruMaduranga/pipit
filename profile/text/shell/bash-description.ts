@@ -11,7 +11,7 @@
  * the session's working directory (lib/shell-run/shell-tool.ts), so the texts
  * say that a directory change is lost between calls.
  *
- * Sentences naming monitor, task_create, Agent or edit are cut by index.ts
+ * Sentences naming monitor, Agent or edit are cut by index.ts
  * when those tools are off; their exact strings are listed there.
  */
 
@@ -103,7 +103,7 @@ Rules for git:
 
 Also:
 - Run nothing besides git commands here: no reading or exploring code.
-- Do not call the task_create or Agent tools here
+- Do not call the Agent tool here
 - Do not push unless the user explicitly asks you to.
 - IMPORTANT: never use git commands with -i (such as git rebase -i or git add -i); they wait for input this tool cannot give.
 - IMPORTANT: git rebase does not accept --no-edit, so do not pass it.
@@ -145,7 +145,7 @@ EOF
 </example>
 
 Also:
-- Do not call the task_create or Agent tools here
+- Do not call the Agent tool here
 - Give the user the pull request's URL when you are done.
 
 # Other common commands

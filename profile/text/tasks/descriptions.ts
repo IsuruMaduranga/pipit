@@ -3,17 +3,13 @@
  * task_get and task_list descriptions and their parameter texts.
  */
 
-export const TASK_CREATE_DESCRIPTION = `Add a task to this session's task list. The list keeps your progress on multi-step work visible to the user and keeps you from losing steps. Each task gets an id and can later carry an owner, metadata and links to other tasks: change it with task_update, read it with task_list and task_get.
+export const TASK_CREATE_DESCRIPTION = `Add a task to this session's task list. The list keeps your progress on long work visible to the user and keeps you from losing steps. Each task gets an id and can later carry an owner, metadata and links to other tasks: change it with task_update, read it with task_list and task_get.
 
 ## When to add tasks
 
-Add them without being asked when:
-- the work has three or more distinct steps
-- the work needs planning or many separate operations
-- you are in plan mode and want to track the work the plan describes
+Add them only when:
 - the user asks for a task list or a to-do list
-- the user hands you several things to do, as a numbered or comma-separated list
-- new instructions arrive: record what the user asked for as tasks right away
+- the work is long enough that the user would lose track of it without a list: many separate operations over a long session, or a long list of separate requests from the user
 
 While you work, mark a task in_progress (with task_update) before you start it, keep only one task in_progress at once, and set it to completed as soon as it is done, adding any follow-up tasks you discovered.
 
@@ -21,7 +17,7 @@ While you work, mark a task in_progress (with task_update) before you start it, 
 
 Do the work directly, without tasks, when:
 - there is a single, simple task
-- the work takes fewer than three easy steps
+- the work is ordinary, even when it takes several steps
 - tracking it would add nothing
 - the request is a question or conversation, not work
 

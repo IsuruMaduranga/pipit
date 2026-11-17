@@ -17,27 +17,31 @@
  * Learning a library goes to the `librarian` agent once three or more
  * lookups are likely.
  *
- * Byte-stable: a pure function of the tools the session can have. The
- * templates are read once, when this module loads, never at render time;
- * no dates, no environment probing. A passage that names a tool is marked
- * in its template (template.ts has the syntax) and follows `live`, the tools
- * the session can have (fixed for the process, pi's `--tools` and
- * `--exclude-tools` included), never the active `tools`, which grow when a
- * deferred tool loads (`lsp_diagnostics`, `task_output` and `task_stop` are
- * deferred) and would change these bytes mid-session.
+ * Byte-stable: a pure function of the tools the session can have and the
+ * features that run in it. The templates are read once, when this module
+ * loads, never at render time; no dates, no environment probing. A passage
+ * that names a tool is marked in its template (template.ts has the syntax)
+ * and follows `live`, the tools the session can have (fixed for the
+ * process, pi's `--tools` and `--exclude-tools` included), never the active
+ * `tools`, which grow when a deferred tool loads (`lsp_diagnostics`,
+ * `task_output` and `task_stop` are deferred) and would change these bytes
+ * mid-session. A passage that states what the base's `lsp` feature adds
+ * follows `features`, also fixed for the process.
  *
- * Two conditions recur. `write|edit` is a file tool: without one there is
- * no rule about how `.bal` files change. `write|edit lsp_diagnostics` means
- * the compiler's errors arrive after each edit: only then does the text
- * promise them. With a file tool and no `lsp_diagnostics` the text neither
- * promises nor denies the `<new-diagnostics>` block, which the base's `lsp`
- * feature adds whether or not its tool is live (the section sees tools, not
- * features; seeing features needs a base seam).
+ * The conditions that recur:
+ * - `write|edit`: a file tool, so there is a rule for how `.bal` files change.
+ * - `write|edit feature:lsp`: the compiler's errors arrive after each edit
+ *   (the `lsp` feature adds the block whether or not `lsp_diagnostics` is live).
+ * - `write|edit|lsp_diagnostics feature:lsp`: the language server's errors,
+ *   with their fix hints (fix-hints.ts), reach the model, and Common errors
+ *   says so. Its bullets stay either way: an error seen through `bal build`,
+ *   in a subagent or with a server that failed to start carries no hint.
  */
 
 import { readFileSync } from "node:fs";
-import type { SectionSession } from "../../../extensions/sdk/extension.ts";
+import type { FeatureId, SectionSession } from "../../../extensions/sdk/extension.ts";
 import type { LiveTools } from "../../../extensions/sdk/profile.ts";
+import { COMPILE_ERRORS, type CompileError } from "./fix-hints.ts";
 import { parseTemplate, render, type Template } from "./template.ts";
 
 /** The templates, in the order the section joins them. */
@@ -61,24 +65,46 @@ export const SECTION_TOOLS: ReadonlySet<string> = new Set([
 	"config_status",
 ]);
 
+/**
+ * Every feature a template may name in a block (`feature:<id>`). A name
+ * outside it fails at load.
+ */
+export const SECTION_FEATURES: ReadonlySet<FeatureId> = new Set<FeatureId>(["lsp"]);
+
 /** The file tools, in the order the text names them. */
 const FILE_TOOLS = ["write", "edit"] as const;
 
 /** Every value name a template may use. A name outside it fails at load. */
-const VALUE_NAMES = ["fileTools", "anyFileTool"] as const;
+const VALUE_NAMES = ["fileTools", "anyFileTool", "generalErrors", "isolationErrors"] as const;
 export const SECTION_VALUES: ReadonlySet<string> = new Set(VALUE_NAMES);
 type SectionValues = Record<(typeof VALUE_NAMES)[number], string>;
+
+/** "`a`", "`a` or `b`", "`a`, `b` or `c`". */
+const either = (items: readonly string[]) => {
+	const quoted = items.map((item) => `\`${item}\``);
+	return quoted.length > 1 ? `${quoted.slice(0, -1).join(", ")} or ${quoted.at(-1)}` : quoted[0];
+};
+
+/** One bullet per row of the group: "- `<message>`: <hint>", the hint's first letter lowered. */
+const errorBullets = (group: CompileError["group"]) =>
+	COMPILE_ERRORS.filter((row) => row.group === group)
+		.map(({ shown, hint }) => `- ${either(shown)}: ${hint[0].toLowerCase()}${hint.slice(1)}`)
+		.join("\n");
+
+/** The compile-error bullets, built once at load: the same bytes for every session. */
+const COMPILE_ERROR_VALUES = { generalErrors: errorBullets("general"), isolationErrors: errorBullets("isolation") };
 
 /**
  * The values a template may use (`{{name}}`), each a pure function of the
  * tools the session can have, so a value never names a tool it lacks:
  * `fileTools` lists the file tools joined by "and" ("`write` and `edit`"),
  * `anyFileTool` joined by "or". Both are empty without a file tool; the
- * templates use them only inside a `write|edit` block.
+ * templates use them only inside a `write|edit` block. `generalErrors` and
+ * `isolationErrors` are the Common errors bullets, the same for every session.
  */
 export function valuesFor(live: LiveTools): SectionValues {
 	const names = FILE_TOOLS.filter((tool) => live.has(tool)).map((tool) => `\`${tool}\``);
-	return { fileTools: names.join(" and "), anyFileTool: names.join(" or ") };
+	return { fileTools: names.join(" and "), anyFileTool: names.join(" or "), ...COMPILE_ERROR_VALUES };
 }
 
 /** A template's source, with the file's line endings and its final newline dropped. */
@@ -87,10 +113,14 @@ function source(part: string): string {
 }
 
 /** The parsed templates, checked once at load. */
-export const TEMPLATES: readonly Template[] = PARTS.map((part) => parseTemplate(source(part), SECTION_TOOLS, `prompt/${part}.md`, SECTION_VALUES));
+export const TEMPLATES: readonly Template[] = PARTS.map((part) => parseTemplate(source(part), SECTION_TOOLS, `prompt/${part}.md`, SECTION_VALUES, SECTION_FEATURES));
 
-/** The section for the session: the same text on every tier; the tools the session can have (`live`) decide the passages that name a tool. */
+/**
+ * The section for the session: the same text on every tier; the tools the
+ * session can have (`live`) decide the passages that name a tool, and the
+ * features that run in it (`features`) the passages about what one adds.
+ */
 export function ballerinaSection(session: SectionSession): string | undefined {
 	const values = valuesFor(session.live);
-	return TEMPLATES.map((template) => render(template, session.live, values)).join("\n\n");
+	return TEMPLATES.map((template) => render(template, session, values)).join("\n\n");
 }

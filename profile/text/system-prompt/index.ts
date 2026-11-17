@@ -65,5 +65,5 @@ export const systemPromptText = (live: LiveTools): SystemPromptText => ({
     },
     tail: ({ tier }) => liveSections(BUNDLES[tier].tail, live),
     // Workhorse, cheap and tiny use the long memory spec.
-    memory: (dir, { tier }) => memoryPromptSection(dir, BUNDLES[tier].verboseMemory),
+    memory: (dir, { tier, taskTools }) => memoryPromptSection(dir, BUNDLES[tier].verboseMemory, taskTools),
 });

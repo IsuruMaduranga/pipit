@@ -16,12 +16,14 @@ import {
 	lspErrorDetail,
 	lspFilesChanged,
 	lspRequest,
+	modelCapability,
 	openInBrowser,
+	productSetting,
 	queueNotice,
 	REMINDER_CHANNEL,
 	type ReminderPayload,
-	sessionModelTier,
 	SYSTEM_PROMPT_SECTION_CHANNEL,
+	thinkingLevelsFor,
 	type SystemPromptSection,
 } from "../../../extensions/sdk/extension.ts";
 import brand from "../../brand.json" with { type: "json" };
@@ -30,7 +32,10 @@ import { probeBallerina, setupNotice } from "./environment.ts";
 import { ensureJar } from "./jar-download.ts";
 import { ballerinaSection } from "./prompt.ts";
 import { registerBallerinaSession } from "./session.ts";
-import { createTierNotices, type NoticeModel } from "./tier-notice.ts";
+import { createReasoningNotices } from "./reasoning-notice.ts";
+import { REASONING_NOTICE_SETTING, TIER_NOTICE_SETTING } from "../../settings.ts";
+import { isAtOrBelowDefault } from "../../thinking.ts";
+import { createTierNotices } from "./tier-notice.ts";
 import { type CommandUi, Visualizer } from "./visualize/visualize.ts";
 
 export const BALLERINA_SECTION_ID = "ballerina";
@@ -59,25 +64,34 @@ function commandUi(ctx: ExtensionCommandContext): CommandUi {
 export const NO_INTERFACE_MESSAGE = "/visualize needs the interactive terminal: the page lives as long as the session. Start the product without -p or --mode, then run /visualize.";
 
 export default function ballerina(pi: ExtensionAPI) {
-	// While loading, before this extension's own handlers: the tier's owner on the bus classifies first.
-	const tier = sessionModelTier(pi);
 	registerBallerinaSession(pi);
 	pi.events.emit(SYSTEM_PROMPT_SECTION_CHANNEL, { id: BALLERINA_SECTION_ID, place: "tail", render: ballerinaSection } satisfies SystemPromptSection);
 
+	// Only a session with an interface that outlives the turn (the terminal, an RPC client) gets the
+	// notices: a one-shot run would print them on every scripted call, with no way to turn them off.
+	// The user's off switch (`settings` in profile/index.ts) is read at each boundary: it may have changed since the last.
+	const noticeWanted = (ctx: ExtensionContext, setting: string) =>
+		ctx.hasUI && (ctx.mode === "tui" || ctx.mode === "rpc") && productSetting(setting, ctx.cwd) !== false;
+
 	// The user's notice when the session model sits below the floor: never in the request.
 	const tierNotices = createTierNotices();
-	const tierNotice = (ctx: ExtensionContext, model: NoticeModel | undefined) => {
-		// Only a session with an interface that outlives the turn (the terminal, an RPC client): a one-shot
-		// run would print it on every scripted call, with no way to turn it off.
-		if (!ctx.hasUI || (ctx.mode !== "tui" && ctx.mode !== "rpc")) return;
-		// The user's off switch belongs here, once the SDK lets a product extension read a setting
-		// (One Code is building `productSetting`); not before it is synced.
-		const text = tierNotices.noticeFor(ctx.sessionManager.getSessionId(), model, tier());
+	const tierNotice = (ctx: ExtensionContext, model: ExtensionContext["model"]) => {
+		if (!noticeWanted(ctx, TIER_NOTICE_SETTING)) return;
+		const text = tierNotices.noticeFor(ctx.sessionManager.getSessionId(), model, modelCapability(model));
 		// Joined with the other startup and model-switch notices.
 		if (text) queueNotice(pi.events, ctx, "warning", text);
 	};
 	pi.on("session_start", (_event, ctx) => tierNotice(ctx, ctx.model));
 	pi.on("model_select", (event, ctx) => tierNotice(ctx, event.model));
+
+	// The user's notice when they raise the thinking level above the default (reasoning-notice.ts, which also
+	// says which announced levels are not the user's pick: pi fits levels to a model and the base sets its own).
+	const reasoningNotices = createReasoningNotices();
+	pi.on("thinking_level_select", (event, ctx) => {
+		if (isAtOrBelowDefault(event.level) || !noticeWanted(ctx, REASONING_NOTICE_SETTING)) return;
+		const text = reasoningNotices.noticeFor(ctx.sessionManager.getSessionId(), event.level, event.previousLevel, thinkingLevelsFor(ctx.model));
+		if (text) queueNotice(pi.events, ctx, "warning", text);
+	});
 
 	// The check runs beside the session, never in its way: the session starts
 	// at once, and the notice joins the next request after the answer is in.

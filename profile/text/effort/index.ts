@@ -1,8 +1,13 @@
 /** The product's `/effort` text (the profile's `text.effort`): the ultracode reminders. */
 
 import type { EffortText } from "../../../extensions/sdk/profile.ts";
+import { DEFAULT_LEVEL, isAtOrBelowDefault } from "../../thinking.ts";
+
+/** One line under the slider's track for each stop above the default level, ultracode included. For the person at the terminal, never the model. */
+export const SLIDER_NOTE = `Integration tasks rarely need more than ${DEFAULT_LEVEL}; a higher level may overthink.`;
 
 export const effort: EffortText = {
+	sliderNote: (choice) => (isAtOrBelowDefault(choice) ? undefined : SLIDER_NOTE),
 	/**
 	 * Standing while ultracode is on: orchestration becomes the default for
 	 * real work, with small edits and conversation left out so the mode does

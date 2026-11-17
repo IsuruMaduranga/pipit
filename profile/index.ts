@@ -16,6 +16,7 @@
 
 import type { Profile } from "../extensions/sdk/profile.ts";
 import { BALLERINA_SERVER, ballerinaLanguageServer } from "./extensions/ballerina/bi-language-server.ts";
+import { BALLERINA_SETTINGS } from "./settings.ts";
 import { askUserText } from "./text/ask-user/index.ts";
 import { classifier } from "./text/auto-mode/classifier.ts";
 import { autoModeSetup } from "./text/auto-mode/setup.ts";
@@ -43,6 +44,7 @@ import { tasks } from "./text/tasks/index.ts";
 import { toolSearchText } from "./text/tool-search/index.ts";
 import { toolStyleText } from "./text/tool-style/index.ts";
 import { webFetchText } from "./text/web-fetch/index.ts";
+import { DEFAULT_LEVEL } from "./thinking.ts";
 import { webSearch } from "./text/web-search/index.ts";
 
 /** A tool the product does not offer: never registered, and a call to it is denied. */
@@ -80,6 +82,17 @@ export const profile: Profile = {
 	// server when its jar is downloaded and fits the distribution, the distribution's own server otherwise.
 	languageServers: {
 		[BALLERINA_SERVER]: ballerinaLanguageServer(),
+	},
+	// The user's switches for the Ballerina extension (settings.ts).
+	settings: BALLERINA_SETTINGS,
+	// Every tier starts at the default reasoning level (thinking.ts). A level the user saved, a launch flag or a pick in the session wins,
+	// and pi raises the level on a model that has no low.
+	defaultThinkingLevels: { frontier: DEFAULT_LEVEL, workhorse: DEFAULT_LEVEL, cheap: DEFAULT_LEVEL, tiny: DEFAULT_LEVEL },
+	// OpenRouter may not serve these vendors' models below 8-bit precision: a DeepSeek session looped on a
+	// 4-bit host. z-ai and minimax stay out until each is measured.
+	openRouterRouting: {
+		deepseek: { quantizations: ["fp8", "bf16", "fp16", "fp32", "unknown"] },
+		qwen: { quantizations: ["fp8", "bf16", "fp16", "fp32", "unknown"] },
 	},
 	text: ({ live }) => ({
 		systemPrompt: systemPromptText(live),

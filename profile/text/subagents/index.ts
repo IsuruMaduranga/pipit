@@ -53,6 +53,8 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
         taskAliasNote: "`prompt` is accepted as another name for it",
         toolNamesHint:
             "In an agent file's `tools` list, name tools by their tool names (such as read, edit, write); the capitalized spellings (Read, Edit, Write, …) are accepted too.",
+        toolsLeftOut: ({ name, tools }) =>
+            `The ${name} agent starts without ${tools.join(", ")}: the tool flags this session was launched with exclude ${tools.length === 1 ? "it" : "them"}.`,
         agentDescription: ({ form, configDir }) => withoutOff(agentDescription(form, configDir), live, AGENT_PASSAGES),
         agentPromptSnippet: "Hand scoped work to a specialist agent with its own context",
         agentParams: {

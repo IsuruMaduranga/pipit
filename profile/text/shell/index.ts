@@ -10,8 +10,6 @@ import { BASH_EDIT_LINE, BASH_MONITOR_SLEEP, BASH_MONITOR_STREAM, BASH_MONITOR_W
 import { POWERSHELL_EDIT_LINE, POWERSHELL_MONITOR_CLAUSE, POWERSHELL_NO_TASK_TOOLS, POWERSHELL_TASK_TOOLS, powerShellToolDescription } from "./powershell-description.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
 
-/** The commit and pull request sections name both task_create and Agent. */
-const BOTH_TASK_AND_AGENT = "task_create or Agent tools";
 
 const BASH_PASSAGES: ToolPassages = {
 	monitor: [
@@ -19,9 +17,8 @@ const BASH_PASSAGES: ToolPassages = {
 		BASH_MONITOR_STREAM,
 		[BASH_MONITOR_SLEEP, "  - A command that opens with a long `sleep` is blocked. Do not string short sleeps together to get past the block.\n"],
 	],
-	// After Agent's: with both off, its replacement leaves "task_create tool".
-	Agent: [[BOTH_TASK_AND_AGENT, "task_create tool"]],
-	task_create: [[BOTH_TASK_AND_AGENT, "Agent tool"], "- Do not call the task_create tool here\n"],
+	// The commit and pull request sections tell the model not to start an agent. They never name task_create: its tools are withheld unless a knob turns them on, which the text cannot see.
+	Agent: ["- Do not call the Agent tool here\n"],
 	edit: [BASH_EDIT_LINE],
 };
 
