@@ -24,7 +24,9 @@ import type { PermissionBridge } from "../../lib/agents/subagent-gate.ts";
 import type { HookBridge } from "../../lib/agents/hook-bridge.ts";
 import { findConfigured, modelSpec } from "../../lib/models/model-policy.ts";
 import { isModelUnavailableError } from "../../lib/models/classifier-model.ts";
-import { type AgentDefinition, agentToolOptions, unusableAllowlistError } from "../../lib/agents/agent-catalog.ts";
+import { toolLive } from "../../lib/profile/profile.ts";
+import { type LevelOwnership, tierThinkingAt } from "../../lib/models/tier-thinking.ts";
+import { type AgentDefinition, agentToolOptions, childMcpTools, toolsRemovedByFlags, unusableAllowlistError } from "../../lib/agents/agent-catalog.ts";
 import { childExtensionPaths } from "../../lib/agents/child-extensions.ts";
 import { type HandbackSlot, SUBAGENT_HANDBACK, subagentHandbackExtension } from "../../lib/agents/subagent-handback.ts";
 import type { RequestCapture } from "../../lib/side-calls/request-replay.ts";
@@ -150,6 +152,23 @@ export function newChildSessionManager(spec: Pick<ChildSessionSpec, "cwd" | "for
 	return manager;
 }
 
+/**
+ * A fresh named agent whose call passed no `thinking` starts at the profile's
+ * level for its own model's tier, under the main session's rules
+ * (lib/models/tier-thinking.ts): a level the user picked in the parent
+ * session (`parent.source` "user"), a level saved for the child's model,
+ * pi's global default or a launch flag the parent's `/effort auto` did not
+ * release keeps pi's own, as before tier levels existed. Set before the first prompt, and fitted by pi to the model, so
+ * the level that runs can be higher than the one declared. A fork runs at
+ * the parent's level, a resume at its branch's.
+ */
+export function applyChildTierDefault(session: Pick<AgentSession, "model" | "settingsManager" | "setThinkingLevel">, parent: LevelOwnership): void {
+	const model = session.model;
+	if (!model) return;
+	const { level } = tierThinkingAt("child", model, session.settingsManager.getSettings(), parent);
+	if (level !== undefined) session.setThinkingLevel(level);
+}
+
 /** Prepend a one-time spawn note (e.g. a model fallback) to an outcome's output. */
 function withNote(outcome: ChildOutcome, note: string | undefined): ChildOutcome {
 	return note ? { ...outcome, output: `${note}\n\n${outcome.output}` } : outcome;
@@ -169,6 +188,8 @@ export class SubagentRuntime {
 	private readonly getParentDeferred: () => DeferRequest[];
 	/** The main session's live permission mode, for a fork: told to it when it differs from what it was told (parent-mode.ts). */
 	private readonly getParentMode: (() => string) | undefined;
+	/** Who set the main session's thinking level (lib/models/tier-thinking.ts levelOwnership); unknown counts as the user's. */
+	private readonly getParentLevelOwnership: () => LevelOwnership;
 	/**
 	 * The parent's permission decision closure (undefined until permissions
 	 * publishes it), wrapped so every call carries the asking run's name: the
@@ -209,10 +230,12 @@ export class SubagentRuntime {
 		onChildWrite: (path: string, runName: string | undefined) => void,
 		getParentDeferred: () => DeferRequest[],
 		getParentMode: (() => string) | undefined,
+		getParentLevelOwnership: () => LevelOwnership,
 	) {
 		this.modelRuntime = modelRuntime;
 		this.getParentDeferred = getParentDeferred;
 		this.getParentMode = getParentMode;
+		this.getParentLevelOwnership = getParentLevelOwnership;
 		this.onChildWrite = onChildWrite;
 		this.baseCwd = baseCwd;
 		this.getMcpTools = getMcpTools;
@@ -244,11 +267,12 @@ export class SubagentRuntime {
 		onChildWrite: (path: string, runName: string | undefined) => void = () => {},
 		getParentDeferred: () => DeferRequest[] = () => [],
 		getParentMode?: () => string,
+		getParentLevelOwnership: () => LevelOwnership = () => ({ source: "user", launchReleased: false }),
 	): Promise<SubagentRuntime> {
 		const modelRuntime = await createSharedModelRuntime(getAgentDir());
 		// Prime the catalog once; spawns read the live snapshot (see resolveModel).
 		await modelRuntime.getAvailable();
-		return new SubagentRuntime(modelRuntime, cwd, getMcpTools, getPermissionBridge, getHookBridge, onExtensionError, onModelUnusable, onChildWrite, getParentDeferred, getParentMode);
+		return new SubagentRuntime(modelRuntime, cwd, getMcpTools, getPermissionBridge, getHookBridge, onExtensionError, onModelUnusable, onChildWrite, getParentDeferred, getParentMode, getParentLevelOwnership);
 	}
 
 	/**
@@ -291,8 +315,9 @@ export class SubagentRuntime {
 				// The tools injected below (the spawn and cron tools, the shared MCP
 				// tools) are deferred as the parent defers them: their owners run there.
 				deferLikeParentExtension(this.getParentDeferred(), injectedByParent(spec.extraTools ?? [])),
-				// Every subagent also gets SendMessage to its caller (sendToMainTool below).
-				subagentHandbackExtension(handback, { deferred: fork, sendMessage: true }),
+				// Every subagent also gets SendMessage to its caller (sendToMainTool below),
+				// unless pi's tool flags removed it (lib/agents/agent-catalog.ts agentToolOptions).
+				subagentHandbackExtension(handback, { deferred: fork, sendMessage: toolLive("SendMessage") }),
 				...(fork && this.getParentMode ? [parentModeExtension(this.getParentMode)] : []),
 				...(fork && spec.parentRequest ? [forkCacheExtension(spec.parentRequest)] : []),
 			],
@@ -415,6 +440,10 @@ export class SubagentRuntime {
 		const newSessionManager = () => newChildSessionManager(spec);
 		// A fork keeps the parent's toolset; only a named agent carries tool lists.
 		const agent = spec.forkFrom ? undefined : spec.agent;
+		// pi's tool flags restrict every child (lib/agents/agent-catalog.ts agentToolOptions).
+		const removed = toolsRemovedByFlags(agent);
+		// Told once, when the agent starts: a resume continues a session that heard it.
+		const flagsNote = removed.length > 0 && agent && !spec.sessionFile ? subagentResultText().toolsLeftOut({ name: agent.name, tools: removed }) : undefined;
 		const make = async (model: string | undefined): Promise<Session> => {
 			const resolvedModel = model ? await this.resolveModel(model) : undefined;
 			const session = await openChildSession({
@@ -428,7 +457,7 @@ export class SubagentRuntime {
 					// The allowlist with the plumbing re-added, and the denylist (CC's "All
 					// tools except …" shape), which filters injected customTools too.
 					...agentToolOptions(agent),
-					customTools: [sendToMainTool((m, s) => spec.onMessageToMain?.(m, s)), ...(spec.extraTools ?? []), ...mcpTools],
+					customTools: [sendToMainTool((m, s) => spec.onMessageToMain?.(m, s)), ...(spec.extraTools ?? []), ...childMcpTools(mcpTools)],
 					sessionManager: newSessionManager(),
 				},
 				startReason: spec.sessionFile ? "resume" : spec.forkFrom ? "fork" : "startup",
@@ -444,19 +473,21 @@ export class SubagentRuntime {
 				this.discard(session);
 				throw new Error(unusable);
 			}
+			if (agent && !spec.sessionFile && spec.thinking === undefined) applyChildTierDefault(session, this.getParentLevelOwnership());
 			if (spec.name) this.runNames.set(session.sessionManager.getSessionId(), spec.name);
 			if (spec.agent) this.agentTypes.set(session.sessionManager.getSessionId(), spec.agent.name);
 			if (spec.mainToolCallId) this.mainToolCalls.set(session.sessionManager.getSessionId(), spec.mainToolCallId);
 			return session;
 		};
+		const withFlagsNote = (note: string | undefined) => [flagsNote, note].filter(Boolean).join("\n") || undefined;
 		try {
-			return { session: await make(spec.model) };
+			return { session: await make(spec.model), note: withFlagsNote(undefined) };
 		} catch (error) {
 			const message = (error as Error).message;
 			if (spec.fallbackModel && spec.fallbackModel !== spec.model && isModelUnavailableError(message)) {
 				return {
 					session: await make(spec.fallbackModel),
-					note: subagentResultText().modelFallback({ model: spec.model, osMessage: message, fallback: spec.fallbackModel }),
+					note: withFlagsNote(subagentResultText().modelFallback({ model: spec.model, osMessage: message, fallback: spec.fallbackModel })),
 				};
 			}
 			throw error;

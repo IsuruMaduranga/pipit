@@ -57,6 +57,20 @@ describe("resolveProfile", () => {
 		expect(() => resolveProfile(empty, { [envName("FEATURES_OFF")]: "plugins" }, "/p")).toThrow(/cannot turn off "plugins"/);
 	});
 
+	it("checks the thinking level a profile declares per model tier", () => {
+		expect(resolveProfile({ ...empty, defaultThinkingLevels: { cheap: "low", frontier: "max" } }, {}, "/p").defaultThinkingLevels).toEqual({ cheap: "low", frontier: "max" });
+		expect(resolveProfile(empty, {}, "/p").defaultThinkingLevels).toEqual({});
+		const bad = { cheapest: "low", tiny: "lowest", workhorse: 3 } as unknown as Profile["defaultThinkingLevels"];
+		expect(() => resolveProfile({ ...empty, defaultThinkingLevels: bad }, {}, "/p")).toThrow(
+			'Invalid profile: defaultThinkingLevels names "cheapest", which is not a model tier (frontier, workhorse, cheap, tiny); defaultThinkingLevels.tiny is "lowest", which is not a thinking level (off, minimal, low, medium, high, xhigh, max); defaultThinkingLevels.workhorse is 3, which is not a thinking level (off, minimal, low, medium, high, xhigh, max).',
+		);
+		// The effort feature applies them: off in the profile, the levels would never take effect.
+		expect(() => resolveProfile({ ...empty, features: { effort: false }, defaultThinkingLevels: { cheap: "low" } }, {}, "/p")).toThrow(/declares defaultThinkingLevels but turns off "effort", the feature that applies them/);
+		expect(resolveProfile({ ...empty, features: { effort: false } }, {}, "/p").features.has("effort")).toBe(false);
+		// The environment's off-switch only stops them from applying.
+		expect(resolveProfile({ ...empty, defaultThinkingLevels: { cheap: "low" } }, { [envName("FEATURES_OFF")]: "effort" }, "/p").features.has("effort")).toBe(false);
+	});
+
 	it("takes pi's built-in bash out of the session when the bash feature is off", () => {
 		for (const resolved of [resolveProfile({ ...empty, features: { bash: false } }, {}, "/p"), resolveProfile(empty, { [envName("FEATURES_OFF")]: "bash" }, "/p")]) {
 			expect(resolved.disabledTools.has("bash")).toBe(true);
@@ -105,6 +119,19 @@ describe("resolveProfile", () => {
 		};
 		expect(() => resolveProfile({ ...empty, text: refusing(" ") }, {}, "/p")).toThrow(/"permissions.secretFileRefusal" must not be empty/);
 		expect(resolveProfile({ ...empty, text: refusing("Ask the user.") }, {}, "/p").text.permissions.secretFileRefusal).toBe("Ask the user.");
+	});
+
+	it("takes an effort slider note that is a function, lets it be left out, and names one that is not", () => {
+		const noting = (sliderNote: unknown): Profile["text"] => (env) => {
+			const text = shippedProfile.text(env);
+			const { ultracodeOn, ultracodeOff } = text.effort!;
+			return { ...text, effort: { ultracodeOn, ultracodeOff, ...(sliderNote === undefined ? {} : { sliderNote }) } } as ReturnType<Profile["text"]>;
+		};
+		const resolved = resolveProfile({ ...empty, text: noting((choice: string) => `note ${choice}`) }, {}, "/p");
+		expect(resolved.text.effort?.sliderNote?.("high")).toBe("note high");
+		expect(resolveProfile({ ...empty, text: noting(undefined) }, {}, "/p").text.effort?.sliderNote).toBeUndefined();
+		expect(() => resolveProfile({ ...empty, text: noting("a string") }, {}, "/p")).toThrow(/Invalid profile: its text "effort.sliderNote" must be a function .* not string/);
+		expect(() => resolveProfile({ ...empty, text: noting(null) }, {}, "/p")).toThrow(/"effort.sliderNote" must be a function .* not object/);
 	});
 
 	it("names a reader for every optional text group, and only features", () => {

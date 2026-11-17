@@ -159,6 +159,7 @@ export const recap: NonNullable<ProfileText["recap"]> = {
 export const effort: NonNullable<ProfileText["effort"]> = {
 	ultracodeOn: "[effort.ultracodeOn]",
 	ultracodeOff: "[effort.ultracodeOff]",
+	sliderNote: (choice) => (choice === "high" ? "[effort.sliderNote:high]" : undefined),
 };
 
 export const planMode: NonNullable<ProfileText["planMode"]> = {
@@ -441,6 +442,7 @@ export const subagents: NonNullable<ProfileText["subagents"]> = {
 		},
 	},
 	forkTask: (p) => mark("subagents.forkTask", p),
+	toolsLeftOut: ({ name, tools }) => `[subagents.toolsLeftOut ${name}: ${tools.join(",")}]`,
 	delegationSteer: "[subagents.delegationSteer]",
 	delegationWithdrawn: "[subagents.delegationWithdrawn]",
 	catalogWithdrawn: "[subagents.catalogWithdrawn]",

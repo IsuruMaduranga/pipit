@@ -61,13 +61,39 @@ export interface CacheMarksModel {
 	compat?: unknown;
 }
 
+/** A model id's vendor: the part before the slash, without a leading `~`. */
+export function modelVendor(modelId: string): string {
+	return modelId.replace(/^~/, "").split("/")[0];
+}
+
+/** Whether `model` is an OpenRouter Chat Completions model, the only kind pi sends `compat.openRouterRouting` for. */
+export function isOpenRouterChatModel(model: CacheMarksModel): boolean {
+	return model.provider === OPENROUTER_PROVIDER && model.api === OPENROUTER_CACHE_MARKS_API;
+}
+
+/** The OpenRouter routing on a model's compat (pi-ai sends it as the request's `provider` object). */
+export type OpenRouterRouting = Record<string, unknown>;
+
+/**
+ * `model` with its `compat.openRouterRouting` replaced by what `change` makes
+ * of it, as a copy; the model itself when it is not an OpenRouter Chat
+ * Completions model or `change` returns the routing it was given.
+ */
+export function withOpenRouterRouting<M extends CacheMarksModel>(model: M, change: (routing: OpenRouterRouting | undefined, vendor: string) => OpenRouterRouting | undefined): M {
+	if (!isOpenRouterChatModel(model)) return model;
+	const compat = (model.compat ?? {}) as Record<string, unknown>;
+	const routing = compat.openRouterRouting as OpenRouterRouting | undefined;
+	const next = change(routing, modelVendor(model.id));
+	if (next === routing) return model;
+	return { ...model, compat: { ...compat, openRouterRouting: next } };
+}
+
 /** Whether pi should mark `model`'s requests: an OpenRouter Chat Completions model of a measured vendor whose compat names no format. */
 export function takesOpenRouterCacheMarks(model: CacheMarksModel): boolean {
-	if (model.provider !== OPENROUTER_PROVIDER || model.api !== OPENROUTER_CACHE_MARKS_API) return false;
+	if (!isOpenRouterChatModel(model)) return false;
 	const compat = (model.compat ?? {}) as Record<string, unknown>;
 	if (compat.cacheControlFormat !== undefined) return false;
-	const vendor = model.id.replace(/^~/, "").split("/")[0];
-	return MARKED_VENDORS.has(vendor);
+	return MARKED_VENDORS.has(modelVendor(model.id));
 }
 
 /** `model` with Anthropic-style breakpoints on, as a copy; the model itself when it does not take them. */
@@ -76,8 +102,8 @@ export function withOpenRouterCacheMarks<M extends CacheMarksModel>(model: M): M
 	return { ...model, compat: { ...((model.compat ?? {}) as Record<string, unknown>), cacheControlFormat: "anthropic" } };
 }
 
-/** The `pi.registerProvider("openrouter", …)` config that marks the open-weight models' requests. */
-export interface OpenRouterCacheMarksConfig<M extends CacheMarksModel, C, O, R> {
+/** The `pi.registerProvider("openrouter", …)` config that adjusts the models of its Chat Completions requests. */
+export interface OpenRouterProviderConfig<M extends CacheMarksModel, C, O, R> {
 	api: typeof OPENROUTER_CACHE_MARKS_API;
 	streamSimple: (model: M, context: C, options?: O) => R;
 }
@@ -85,13 +111,14 @@ export interface OpenRouterCacheMarksConfig<M extends CacheMarksModel, C, O, R> 
 /**
  * A provider config whose stream hands every OpenRouter Chat Completions
  * request to `stream` (pi-ai's implementation, the one pi's own `openrouter`
- * provider dispatches to) with the model passed through
- * `withOpenRouterCacheMarks`. pi's provider composer calls it for that
- * provider's `openai-completions` models only, for the session loop, in-process
- * children and side calls alike (side calls send through the model registry),
- * with auth and headers already resolved; its `anthropic-messages` models stay
- * with pi's provider.
+ * provider dispatches to) with the model passed through `adjust`
+ * (`withOpenRouterCacheMarks`, lib/request/openrouter-ignored-hosts.ts
+ * `withOpenRouterIgnoredHosts`, or both). pi's provider composer calls it for
+ * that provider's `openai-completions` models only, for the session loop,
+ * in-process children and side calls alike (side calls send through the model
+ * registry), with auth and headers already resolved; its `anthropic-messages`
+ * models stay with pi's provider.
  */
-export function openRouterCacheMarksProvider<M extends CacheMarksModel, C, O, R>(stream: (model: M, context: C, options?: O) => R): OpenRouterCacheMarksConfig<M, C, O, R> {
-	return { api: OPENROUTER_CACHE_MARKS_API, streamSimple: (model, context, options) => stream(withOpenRouterCacheMarks(model), context, options) };
+export function openRouterProvider<M extends CacheMarksModel, C, O, R>(stream: (model: M, context: C, options?: O) => R, adjust: (model: M) => M): OpenRouterProviderConfig<M, C, O, R> {
+	return { api: OPENROUTER_CACHE_MARKS_API, streamSimple: (model, context, options) => stream(adjust(model), context, options) };
 }

@@ -67,6 +67,7 @@ import { captureMatches, LAST_REQUEST_CHANNEL, type RequestCapture } from "../..
 import { BTW_FORK_CHANNEL, btwForkDescription, btwForkName, btwForkRecord, btwForkTaskId, type BtwForkRequest, type BtwForkResult } from "../../lib/side-calls/btw-fork.ts";
 import { watchMcpTools } from "../../lib/plugins/mcp-share.ts";
 import { sessionModelTier } from "../../lib/models/session-model-tier.ts";
+import { levelOwnership } from "../../lib/models/tier-thinking.ts";
 import { type DescriptionForm, followDescriptionForm, registerVariantTool } from "../../lib/profile/tool-variants.ts";
 import { prepareAgentArguments } from "./agent-args.ts";
 import { projectConfigDirName } from "../../lib/profile/sources.ts";
@@ -74,7 +75,7 @@ import { instructionFileNames } from "../../lib/context/instructions.ts";
 import { runningAfterCompactionReminder } from "./running-after-compaction.ts";
 import { watchPermissionBridge } from "../../lib/agents/subagent-gate.ts";
 import { watchHookBridge } from "../../lib/agents/hook-bridge.ts";
-import { CONTEXT_ORDER, REMINDER_CHANNEL, RENDER_CHANNEL, type RenderRequest, type ReminderPayload, toldBlockFact } from "../../lib/request/reminders.ts";
+import { CONTEXT_ORDER, REMINDER_CHANNEL, RENDER_CHANNEL, type RenderRequest, type ReminderPayload, toldBlockFact, untoldBlockFact } from "../../lib/request/reminders.ts";
 import { type BackgroundTask, generateTaskId, TASK_REGISTER_CHANNEL } from "../../lib/agents/task-registry.ts";
 import { type ChildAction } from "../../lib/rules/auto-mode-actions.ts";
 import { type ChildOutcome, forkTaskMessage, OUTPUT_CAP, type RpcChildHandle } from "./outcome.ts";
@@ -465,6 +466,8 @@ function subagentsExtension(pi: ExtensionAPI) {
 			() => queryDeferred(pi.events),
 			// The mode a fork's calls are checked in, read live at each of its requests (parent-mode.ts).
 			() => permissionMode,
+			// Whether a named agent may take its tier's thinking level: not when the user picked the session's level.
+			() => (lastCtx ? levelOwnership(lastCtx.sessionManager.getBranch()) : { source: "user", launchReleased: false }),
 		).catch((error: unknown) => {
 			runtimePromise = undefined;
 			throw error;
@@ -665,10 +668,8 @@ function subagentsExtension(pi: ExtensionAPI) {
 		}
 		for (const key of Object.keys(liveBlocks) as SubagentBlockKey[]) {
 			const text = liveBlocks[key];
-			// An absent block is told as its empty text; one never told needs no withdrawal.
-			const told = request.toldBlocks.get(key);
-			const fact = toldBlockFact(key, text ?? "");
-			if (told === fact.hash || (text === null && told === undefined)) continue;
+			const fact = untoldBlockFact(request, key, text);
+			if (!fact) continue;
 			const facts = [fact];
 			if (text === null) request.blocks.push({ text: words[WITHDRAWN[key]], facts });
 			else if (key === "subagent-models" && refusal) request.blocks.push({ text: refusal.refused.map((model) => refusedModelNote(model, refusal?.replacement)).join("\n"), facts });
@@ -1689,14 +1690,14 @@ function subagentsExtension(pi: ExtensionAPI) {
 	const spawnToolsFor = (record: AgentRunRecord, { resident = false } = {}): ToolDefinition[] => {
 		const depth = record.depth ?? 0;
 		// The child's cron tools reach this session's store (lib/agents/agent-cron.ts);
-		// none when the background feature is off (no store answers them). pi's
-		// tool flags filter this session's registry, not a child's, so they count
-		// only for a fork, whose tools must match this session's to read its cache.
-		// Each tool is asked on its own: the flags can take out one of the three.
-		const cronLive = record.agent === FORK_AGENT ? toolLive : (name: string) => activeProfile().profileLive.has(name);
+		// none when the background feature is off (no store answers them). Each is
+		// asked on its own, against the tools this session can have: pi's tool flags
+		// restrict every child as they restrict this session (lib/agents/agent-catalog.ts
+		// agentToolOptions), and a fork's tools must match this session's to read its
+		// cache. The flags can take out one of the three.
 		const cronText = profileText().background?.cron;
 		const cron = cronText
-			? (agentCronTools(pi.events, { agentId: record.taskId, cwd: record.cwd, resident }, cronWords(cronText)) as unknown as ToolDefinition[]).filter((tool) => cronLive(tool.name))
+			? (agentCronTools(pi.events, { agentId: record.taskId, cwd: record.cwd, resident }, cronWords(cronText)) as unknown as ToolDefinition[]).filter((tool) => toolLive(tool.name))
 			: [];
 		return depth < MAX_SPAWN_DEPTH ? [childAgentTool(record, depth), ...cron] : cron;
 	};
