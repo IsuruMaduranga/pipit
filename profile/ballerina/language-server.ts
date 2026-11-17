@@ -2,7 +2,7 @@
  * Which Ballerina language server the profile starts for `.bal` files (pure:
  * no pi imports, no file reads). The diagram view needs the BI designer's
  * server, a fat jar the product downloads once into its state folder
- * (jar-download.ts). Diagnostics need any server. So on macOS and Linux the
+ * (extensions/ballerina/jar-download.ts). Diagnostics need any server. So on macOS and Linux the
  * profile declares a launcher script, `language-server.sh`, that starts the
  * jar when it is present, the right size, and built for the installed
  * distribution, and the distribution's own `bal start-language-server`
@@ -15,7 +15,7 @@
 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sharedStateDir } from "../../../extensions/sdk/profile.ts";
+import { sharedStateDir } from "../../extensions/sdk/profile.ts";
 import { BALLERINA_FIX_HINTS, type BallerinaFixHints } from "./fix-hints.ts";
 
 export interface JarPin {

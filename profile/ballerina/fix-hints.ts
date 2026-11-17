@@ -9,7 +9,7 @@
  * was reproduced: working-docs/findings/02-language-server/diagnostic-codes.md.
  */
 
-import type { ProductLanguageServer } from "../../../extensions/sdk/profile.ts";
+import type { ProductLanguageServer } from "../../extensions/sdk/profile.ts";
 
 /** The shape the base reads: `ProductLanguageServer.fixHints`. */
 export type BallerinaFixHints = NonNullable<ProductLanguageServer["fixHints"]>;

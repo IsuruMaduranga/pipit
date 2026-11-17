@@ -19,7 +19,7 @@ import { userInfo } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { lspFilesChanged, MIN_SECRET_LENGTH, persistIfLarge, sessionResultsDir, setSecretValues, toolRenderers } from "../../../extensions/sdk/extension.ts";
-import { BALLERINA_SERVER } from "./bi-language-server.ts";
+import { BALLERINA_SERVER } from "../../ballerina/language-server.ts";
 import { distributionOf } from "./environment.ts";
 import { CreateError, createdFileChanges, createIntegration, formatCreated } from "./create-integration.ts";
 import { configReport, formatReport, projectSecrets, type ReportCounts, reportCounts } from "./config-status.ts";

@@ -19,7 +19,7 @@
 
 import { basename, isAbsolute, relative } from "node:path";
 import { isMethodNotFound, type LspErrorDetail, type LspFileChange, type NoBrowser } from "../../../../extensions/sdk/extension.ts";
-import { type LauncherCheck, launcherProblem } from "../bi-language-server.ts";
+import { type LauncherCheck, launcherProblem } from "../../../ballerina/language-server.ts";
 import { findProject, MANIFEST, type Project } from "../project.ts";
 import { type ModelRequest, projectInfoRequest, type ViewPackage } from "./routes.ts";
 import { startViewerServer, type ViewerServer, type ViewProject } from "./server.ts";

@@ -27,7 +27,7 @@ import {
 	type SystemPromptSection,
 } from "../../../extensions/sdk/extension.ts";
 import brand from "../../brand.json" with { type: "json" };
-import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "./bi-language-server.ts";
+import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "../../ballerina/language-server.ts";
 import { probeBallerina, setupNotice } from "./environment.ts";
 import { ensureJar } from "./jar-download.ts";
 import { ballerinaSection } from "./prompt.ts";

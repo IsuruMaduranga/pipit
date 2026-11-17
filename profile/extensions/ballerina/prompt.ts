@@ -41,7 +41,7 @@
 import { readFileSync } from "node:fs";
 import type { FeatureId, SectionSession } from "../../../extensions/sdk/extension.ts";
 import type { LiveTools } from "../../../extensions/sdk/profile.ts";
-import { COMPILE_ERRORS, type CompileError } from "./fix-hints.ts";
+import { COMPILE_ERRORS, type CompileError } from "../../ballerina/fix-hints.ts";
 import { parseTemplate, render, type Template } from "./template.ts";
 
 /** The templates, in the order the section joins them. */

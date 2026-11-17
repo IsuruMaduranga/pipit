@@ -15,7 +15,7 @@ import { lspErrorDetail } from "../../extensions/sdk/extension.ts";
 import { LspResponseError } from "../../extensions/tools/lsp/failure.ts";
 import ballerinaChild from "../extensions/ballerina/child.ts";
 import ballerina, { VISUALIZE_COMMAND } from "../extensions/ballerina/index.ts";
-import type { LauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
+import type { LauncherCheck } from "../ballerina/language-server.ts";
 import type { ModelRequest } from "../extensions/ballerina/visualize/routes.ts";
 import { type CommandUi, initialPackage, type VisualizeEnv, Visualizer, WINDOWS_MESSAGE } from "../extensions/ballerina/visualize/visualize.ts";
 

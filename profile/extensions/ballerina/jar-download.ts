@@ -13,7 +13,7 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync
 import { basename, dirname, join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { JarPin } from "./bi-language-server.ts";
+import type { JarPin } from "../../ballerina/language-server.ts";
 
 /** A download or check that failed; the message names the cause and the fix. */
 export class JarDownloadError extends Error {}

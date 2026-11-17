@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { JarPin } from "../extensions/ballerina/bi-language-server.ts";
+import type { JarPin } from "../ballerina/language-server.ts";
 import { ensureJar, JarDownloadError } from "../extensions/ballerina/jar-download.ts";
 
 const BODY = Buffer.from("not really a jar, but the right bytes");

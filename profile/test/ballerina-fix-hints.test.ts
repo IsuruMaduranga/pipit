@@ -1,6 +1,6 @@
 /**
  * The fix hints the `ballerina` language server declares
- * (profile/extensions/ballerina/fix-hints.ts), run through the base's own
+ * (profile/ballerina/fix-hints.ts), run through the base's own
  * validator, matcher and `<new-diagnostics>` formatter. Each sample below is
  * a diagnostic as Ballerina 2201.14.0 sent it, the same from the stock server
  * and the BI jar (working-docs/findings/02-language-server/diagnostic-codes.md),
@@ -14,8 +14,8 @@ import { languageServerProblems, MAX_FIX_HINT_LENGTH, resolveLanguageServers } f
 import { fixHintFor, withFixHints } from "../../extensions/tools/lsp/fix-hints.ts";
 import type { LspDiagnostic } from "../../extensions/tools/lsp/format.ts";
 import { formatNewDiagnostics } from "../../extensions/tools/lsp/watcher.ts";
-import { BALLERINA_SERVER, ballerinaLanguageServer } from "../extensions/ballerina/bi-language-server.ts";
-import { BALLERINA_FIX_HINTS, COMPILE_ERRORS } from "../extensions/ballerina/fix-hints.ts";
+import { BALLERINA_SERVER, ballerinaLanguageServer } from "../ballerina/language-server.ts";
+import { BALLERINA_FIX_HINTS, COMPILE_ERRORS } from "../ballerina/fix-hints.ts";
 import { profile } from "../index.ts";
 import { EM_DASH } from "./em-dash.ts";
 

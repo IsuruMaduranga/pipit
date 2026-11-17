@@ -10,11 +10,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import brand from "../brand.json" with { type: "json" };
-import { BI_JAR, ballerinaLanguageServer, jarPath, LAUNCHER_PATH, launcherArgs, launcherProblem, parseLauncherCheck } from "../extensions/ballerina/bi-language-server.ts";
+import { BI_JAR, ballerinaLanguageServer, jarPath, LAUNCHER_PATH, launcherArgs, launcherProblem, parseLauncherCheck } from "../ballerina/language-server.ts";
 import { sharedStateDir } from "../../extensions/sdk/profile.ts";
 import { profile } from "../index.ts";
 
-const SCRIPT = fileURLToPath(new URL("../extensions/ballerina/language-server.sh", import.meta.url));
+const SCRIPT = fileURLToPath(new URL("../ballerina/language-server.sh", import.meta.url));
 
 describe("the declared server", () => {
 	it("starts the launcher on macOS and Linux, with the jar's path and the pin", () => {

@@ -1,6 +1,6 @@
 #!/bin/sh
 # The Ballerina language server for the product's `.bal` files, on macOS and
-# Linux (bi-language-server.ts declares it; Windows gets the stock server).
+# Linux (language-server.ts declares it; Windows gets the stock server).
 #
 #   language-server.sh [--check] <jar> <jar size in bytes> <distribution update> <java major>
 #

@@ -18,7 +18,7 @@ import type { LiveFeatures } from "../../extensions/sdk/extension.ts";
 import type { LiveTools } from "../../extensions/sdk/profile.ts";
 import { TOOL_FEATURES } from "../../extensions/lib/profile/features.ts";
 import { deferralChanges, type EnglishPhrases, mentions, type NamedText, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
-import { COMPILE_ERRORS } from "../extensions/ballerina/fix-hints.ts";
+import { COMPILE_ERRORS } from "../ballerina/fix-hints.ts";
 import { ballerinaSection, SECTION_FEATURES, SECTION_TOOLS, SECTION_VALUES, TEMPLATES, valuesFor } from "../extensions/ballerina/prompt.ts";
 import { CONFIG_STATUS_TOOL, CREATE_INTEGRATION_TOOL } from "../extensions/ballerina/session.ts";
 import { blockFeatures, blockTools } from "./block-tools.ts";

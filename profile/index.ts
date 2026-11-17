@@ -15,7 +15,7 @@
  */
 
 import type { Profile } from "../extensions/sdk/profile.ts";
-import { BALLERINA_SERVER, ballerinaLanguageServer } from "./extensions/ballerina/bi-language-server.ts";
+import { BALLERINA_SERVER, ballerinaLanguageServer } from "./ballerina/language-server.ts";
 import { BALLERINA_SETTINGS } from "./settings.ts";
 import { askUserText } from "./text/ask-user/index.ts";
 import { classifier } from "./text/auto-mode/classifier.ts";
