@@ -7,7 +7,9 @@
  * model sits below the tier the product works best on (tier-notice.ts), and
  * the `/visualize` command (visualize/visualize.ts), which shows the
  * integration's diagrams in a browser. Neither of the last two adds anything
- * to the model's request. A child session loads child.ts instead.
+ * to the model's request. A child session loads child.ts instead. Both
+ * export their factory through the SDK's `productExtension`, which runs it
+ * only under a profile that runs this folder (`Profile.extensions`).
  */
 
 import { fileURLToPath } from "node:url";
@@ -19,6 +21,7 @@ import {
 	modelCapability,
 	openInBrowser,
 	productSetting,
+	productExtension,
 	queueNotice,
 	REMINDER_CHANNEL,
 	type ReminderPayload,
@@ -63,7 +66,7 @@ function commandUi(ctx: ExtensionCommandContext): CommandUi {
  */
 export const NO_INTERFACE_MESSAGE = "/visualize needs the interactive terminal: the page lives as long as the session. Start the product without -p or --mode, then run /visualize.";
 
-export default function ballerina(pi: ExtensionAPI) {
+export default productExtension("ballerina", function ballerina(pi: ExtensionAPI) {
 	registerBallerinaSession(pi);
 	pi.events.emit(SYSTEM_PROMPT_SECTION_CHANNEL, { id: BALLERINA_SECTION_ID, place: "tail", render: ballerinaSection } satisfies SystemPromptSection);
 
@@ -139,4 +142,4 @@ export default function ballerina(pi: ExtensionAPI) {
 			visualizer.open(commandUi(ctx));
 		},
 	});
-}
+});

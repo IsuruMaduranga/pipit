@@ -5,8 +5,9 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { productExtension } from "../../../extensions/sdk/extension.ts";
 import { registerBallerinaSession } from "./session.ts";
 
-export default function ballerinaChild(pi: ExtensionAPI) {
+export default productExtension("ballerina", function ballerinaChild(pi: ExtensionAPI) {
 	registerBallerinaSession(pi);
-}
+});
