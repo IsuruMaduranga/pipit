@@ -103,9 +103,17 @@ export const PRODUCT_EXTENSIONS_DIR = "extensions";
  * announces at load, and after the request pipeline, so a product extension
  * must not shape the request tail. Only `secret-values` loads after it, to
  * redact what a product's result handlers add. These entries belong to no feature: the
- * product ships the ones it wants (working-docs/decisions/bi-fork.md).
+ * product ships the ones it wants, and since the glob is fixed before any
+ * profile is read, each entry's `productExtension` wrapper skips it under a
+ * profile that does not run it (`Profile.extensions`;
+ * working-docs/decisions/bi-fork.md).
  */
 export const PRODUCT_EXTENSIONS_ENTRY = `profile/${PRODUCT_EXTENSIONS_DIR}/*/index.ts`;
+
+/** Whether a folder under the product's `extensions/` is one the entry's glob loads: pi's glob skips dot folders. */
+export function isProductExtensionFolder(name: string): boolean {
+	return !name.startsWith(".");
+}
 
 export const FEATURE_IDS = Object.keys(FEATURES) as FeatureId[];
 
@@ -138,6 +146,7 @@ export const TOOL_FEATURES: Readonly<Record<string, FeatureId>> = {
 	schedule_wakeup: "background",
 	task_output: "background",
 	task_stop: "background",
+	yield: "background",
 	lsp_diagnostics: "lsp",
 	list_mcp_resources: "mcp",
 	read_mcp_resource: "mcp",
@@ -170,7 +179,7 @@ export const TOOL_FEATURES: Readonly<Record<string, FeatureId>> = {
  */
 export const BUNDLED_SKILL_TOOLS: Readonly<Record<string, readonly string[]>> = {
 	"artifact-design": ["artifact"],
-	loop: ["cron_create", "cron_delete", "schedule_wakeup", "monitor", "task_output", "task_stop"],
+	loop: ["cron_create", "cron_delete", "schedule_wakeup", "monitor", "task_stop"],
 	"workflow-authoring": ["workflow"],
 };
 
@@ -220,7 +229,7 @@ export const FEATURE_CORE_TOOLS: Readonly<Partial<Record<FeatureId, readonly str
 export const TOOL_NEEDS: Readonly<Record<string, readonly string[]>> = {
 	cron_list: ["cron_create"],
 	cron_delete: ["cron_create"],
-	monitor: ["task_output", "task_stop"],
+	monitor: ["task_stop"],
 	read_mcp_resource: ["list_mcp_resources"],
 	list_agents: ["Agent"],
 };

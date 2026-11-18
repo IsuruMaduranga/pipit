@@ -277,6 +277,11 @@ const BLOCK_ORDER: Record<SubagentBlockKey, number> = {
 /** The `one-code:state` key of the models this account refused (lib/models/model-unusable.ts). */
 const REFUSED_MODELS_STATE = "subagents:refused-models";
 
+/** How the non-TUI notices name the task tools: task_output only while it is live (the profile may switch it off). */
+function taskToolsHint(): string {
+	return toolLive("task_output") ? "task_output and task_stop inspect or stop a task." : "task_stop stops a task.";
+}
+
 function subagentsExtension(pi: ExtensionAPI) {
 	/** The profile's subagent words (fails closed: every Agent call reads them). */
 	const words = subagentWords();
@@ -955,7 +960,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 
 	const openView = (ctx: ExtensionContext, taskId: string) => {
 		if (ctx.mode !== "tui") {
-			ctx.ui.notify("The live subagent panel requires TUI mode. Use /tasks for task status; task_output and task_stop inspect or stop a task.", "warning");
+			ctx.ui.notify(`The live subagent panel requires TUI mode. Use /tasks for task status; ${taskToolsHint()}`, "warning");
 			return;
 		}
 		if (view) return view.retarget(taskId);
@@ -1385,7 +1390,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 				toolUseId: opts.toolUseId,
 				outputFile: opts.outputFile,
 				status,
-				summary: agentSummary(record?.description ?? opts.name, status),
+				summary: agentSummary(record?.description ?? opts.name, status, status === "failed" ? opts.outcome.failureReason : undefined),
 				note: agentNote(),
 				result,
 				usage: { subagentTokens: opts.outcome.usage.total, toolUses: opts.outcome.toolCalls, durationMs: Date.now() - opts.startedAt },
@@ -2823,7 +2828,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 			ctx.ui.notify([
 				"The interactive task viewer requires TUI mode; showing a task snapshot instead.",
 				...(lines.length ? lines : ["No background tasks in this session."]),
-				"Use task_output to inspect a task and task_stop to stop it.",
+				`Use /tasks for task status; ${taskToolsHint()}`,
 			].join("\n"), "info");
 			return;
 		}
@@ -2943,7 +2948,8 @@ function subagentsExtension(pi: ExtensionAPI) {
 	// first, then running, then a finished run resumable from its session.
 	const agentStatus = (record: AgentRunRecord): RunStatus => {
 		const resident = residents.get(record.taskId);
-		if (resident && !resident.handle.exited()) return "resident";
+		// A resident mid-turn is running; between turns it is idle, waiting for a message.
+		if (resident && !resident.handle.exited()) return resident.handle.busy() ? "running" : "resident";
 		if (runningIds.has(record.taskId)) return "running";
 		return record.inline ? "finishedInline" : "finished";
 	};
@@ -2990,7 +2996,7 @@ function subagentsExtension(pi: ExtensionAPI) {
 				ctx.ui.notify([
 					"The live subagent panel requires TUI mode; showing spawned agents instead.",
 					...registry.list().map((run) => subagentResultText().agentRow({ name: run.name, agent: run.agent, taskId: run.taskId, status: agentStatus(run) })),
-					"Use /tasks for task status; task_output and task_stop inspect or stop a task.",
+					`Use /tasks for task status; ${taskToolsHint()}`,
 				].join("\n"), "info");
 				return;
 			}

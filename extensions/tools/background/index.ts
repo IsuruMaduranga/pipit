@@ -27,7 +27,7 @@ import { persistedFilePreview, persistIfLarge, sessionResultsDir } from "../../l
 import { KILL_GRACE_MS, waitForChildExit } from "../../lib/shell-run/process-tree.ts";
 import { sessionAlive } from "../../lib/notify/session-lifecycle.ts";
 import { bashSpawn } from "../../lib/shell-run/shell-spawn.ts";
-import { ClickToggles, clickToExpand, toolRenderers, customMessageText, expandHintFor, formatFireTime, liveUiCtx, notificationComponent, scheduledTaskComponent } from "../../lib/ui/tui-render.ts";
+import { ClickToggles, clickToExpand, toolRenderers, customMessageText, expandHintFor, formatDuration, formatFireTime, liveUiCtx, notificationComponent, scheduledTaskComponent } from "../../lib/ui/tui-render.ts";
 import {
 	type BackgroundTask,
 	BackgroundRegistry,
@@ -68,6 +68,9 @@ import {
 	monitorEndedSummary,
 	monitorEventSummary,
 	oneShotNote,
+	NOTIFICATION_HANDED_CHANNEL,
+	NOTIFIER_BACKLOG_CHANNEL,
+	type NotifierBacklogQuery,
 	sessionOutlivesTurn,
 	TASK_OUTPUT_DELIVERED_CHANNEL,
 	type TaskOutputDelivered,
@@ -104,12 +107,25 @@ import { recordState, stateSinceCompaction } from "../../lib/request/ledger/stat
 import { processState } from "../../lib/profile/process-state.ts";
 import { extensionVersion } from "../../lib/app/package-version.ts";
 import { spawnOwnedShell, STORED_OUTPUT_CAP, tailCap } from "../../lib/shell-run/bash-background.ts";
+import { REMINDER_CHANNEL, type ReminderPayload } from "../../lib/request/reminders.ts";
+import type { YieldEnd } from "./text.ts";
+import { waitForBackground } from "./yield-wait.ts";
 
 /** Claude Code's `task_output` limit (`TASK_MAX_OUTPUT_DEFAULT`). */
 const TASK_OUTPUT_MAX_CHARS = 32_000;
 const DEFAULT_MONITOR_TIMEOUT_MS = 300_000;
-const MAX_MONITOR_TIMEOUT_MS = 3_600_000;
+/** Claude Code 2.1.327's monitor deadlines: the schema accepts up to an hour, a longer one is capped to 30 minutes. */
+const MAX_MONITOR_TIMEOUT_MS = 1_800_000;
+const MONITOR_TIMEOUT_SCHEMA_MAX_MS = 3_600_000;
 const MAX_BLOCK_TIMEOUT_MS = 600_000;
+/** A binary WebSocket frame's size, for Claude Code's `[binary frame, N bytes]` event line. */
+function binaryFrameBytes(data: unknown): number {
+	if (data instanceof ArrayBuffer) return data.byteLength;
+	if (ArrayBuffer.isView(data)) return data.byteLength;
+	if (typeof Blob !== "undefined" && data instanceof Blob) return data.size;
+	return 0;
+}
+
 /** setTimeout's longest delay; a later fire re-arms when this one wakes. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
@@ -187,7 +203,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 	const monitorParams = text.monitor.params({ defaultTimeoutMs: DEFAULT_MONITOR_TIMEOUT_MS, maxTimeoutMs: MAX_MONITOR_TIMEOUT_MS });
 	const spoolLost = text.monitor.spoolLost({ keptChars: STORED_OUTPUT_CAP });
 	const unknownTask = (id: string) => ({
-		content: [{ type: "text" as const, text: text.tasks.unknownTask({ id, known: registry.list().map((t) => t.id) }) }],
+		content: [{ type: "text" as const, text: text.tasks.unknownTask({ id, known: registry.list().map((t) => ({ id: t.id, description: t.description })) }) }],
 		details: {},
 		isError: true,
 	});
@@ -413,8 +429,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 		parameters: Type.Object({
 			command: Type.Optional(Type.String({ description: monitorParams.command })),
 			description: Type.String({ description: monitorParams.description }),
-			persistent: Type.Optional(Type.Boolean({ description: monitorParams.persistent })),
-			timeout_ms: Type.Optional(Type.Number({ minimum: 1000, description: monitorParams.timeoutMs })),
+			timeout_ms: Type.Number({ minimum: 1000, maximum: MONITOR_TIMEOUT_SCHEMA_MAX_MS, default: DEFAULT_MONITOR_TIMEOUT_MS, description: monitorParams.timeoutMs }),
 			ws: Type.Optional(
 				Type.Object(
 					{
@@ -491,7 +506,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 				// end's own recent tail and task_output's result hold those lines.
 				notify(
 					"task-notification",
-					taskNotification({ kind: "monitor", taskId: id, summary: monitorEventSummary(params.description), result: formatMonitorEvents(id, batch, text.monitor.moreLines) }),
+					taskNotification({ kind: "monitor", taskId: id, summary: monitorEventSummary(params.description), result: formatMonitorEvents(id, batch, (more) => text.monitor.moreLines({ ...more, logPath: task.logPath })) }),
 					{ taskId: id, events: batchSize(batch), ...(force ? { [TASK_COMPLETION_KEY]: true } : {}) },
 				);
 			};
@@ -502,6 +517,10 @@ function backgroundExtension(pi: ExtensionAPI) {
 			// Stderr is kept, since an error written just before the stop can still be
 			// in the pipe; only bash's report of the job the stop killed is dropped.
 			let stopRequested = false;
+			// Set by the deadline: the end is Claude Code's expiry notice in the last
+			// batch, not a "stopped" notification (findings §94).
+			let expired = false;
+			let stderrWritten = false;
 			const onEvent = (line: string) => {
 				if (stopRequested) return;
 				eventCount++;
@@ -526,6 +545,14 @@ function backgroundExtension(pi: ExtensionAPI) {
 					finish();
 					// After shutdown or inside a one-shot run, report through `finished` alone.
 					if (!alive() || oneShot) return;
+					if (expired) {
+						// The expiry line rides the monitor's last batch and is no event.
+						const duration = formatDuration(0, timeoutMs).replace(/ 0[sm]$/, "");
+						pushEvent(pending, text.monitor.expired({ duration, events: eventCount, stderrPath: stderrWritten ? task.logPath : undefined }));
+						flush(true);
+						updateWidget();
+						return;
+					}
 					flush(true);
 					updateWidget();
 					// CC's monitor end: the recent tail rides <event> under the ended summary.
@@ -581,7 +608,10 @@ function backgroundExtension(pi: ExtensionAPI) {
 				child.stdout?.on("data", (chunk: Buffer) => {
 					for (const line of lines.push(stdoutText.write(chunk))) onEvent(line);
 				});
-				const stderrRecord = (text: string) => record(stopRequested ? withoutJobReport(text) : text);
+				const stderrRecord = (text: string) => {
+					if (text) stderrWritten = true;
+					record(stopRequested ? withoutJobReport(text) : text);
+				};
 				child.stderr?.on("data", (chunk: Buffer) => {
 					stderrRecord(stderrText.write(chunk));
 				});
@@ -613,7 +643,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 					return startFailed({ kind: "socketFailed", url: params.ws!.url, osMessage: (error as Error).message });
 				}
 				ws.addEventListener("message", (event) => {
-					onEvent(typeof event.data === "string" ? event.data : "[binary frame]");
+					onEvent(typeof event.data === "string" ? event.data : `[binary frame, ${binaryFrameBytes(event.data)} bytes]`);
 				});
 				ws.addEventListener("error", () => end("failed", "websocket error"));
 				ws.addEventListener("close", () => end(stopRequested ? "stopped" : "completed", "socket closed"));
@@ -635,19 +665,19 @@ function backgroundExtension(pi: ExtensionAPI) {
 			};
 			// A one-shot monitor is awaited below and never addressable afterwards, so
 			// it is not registered behind task_output/task_stop (like bash's blocking
-			// path); `persistent` cannot be honoured either — the deadline applies.
+			// path).
 			if (!oneShot) {
 				registry.register(task);
 				updateWidget();
 			}
 
 			const timeoutMs = Math.min(params.timeout_ms ?? DEFAULT_MONITOR_TIMEOUT_MS, MAX_MONITOR_TIMEOUT_MS);
-			if (oneShot || !params.persistent) {
-				const timer = setTimeout(() => {
-					if (task.status === "running") stop();
-				}, timeoutMs);
-				timer.unref?.();
-			}
+			const timer = setTimeout(() => {
+				if (task.status !== "running") return;
+				expired = true;
+				stop();
+			}, timeoutMs);
+			timer.unref?.();
 
 			if (oneShot) {
 				const unhook = whenAborted(signal, stop);
@@ -667,7 +697,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 						? { kind: finalStatus === "failed" ? "failed" : "completed" }
 						: signal?.aborted
 							? { kind: "aborted" }
-							: { kind: "deadline", ms: timeoutMs, persistentAsked: params.persistent === true };
+							: { kind: "deadline", ms: timeoutMs };
 				return {
 					content: [
 						{
@@ -752,6 +782,62 @@ function backgroundExtension(pi: ExtensionAPI) {
 				content: [...flag, { type: "text", text: `${header}\n\n${body}` }],
 				details: { taskId: task.id, status: task.status, logPath: task.logPath },
 			};
+		},
+	});
+
+	// One wait per reply, as in Claude Code: a second yield in the same reply returns at once.
+	let yieldedInReply = false;
+	pi.on("message_start", (event) => {
+		if ((event.message as { role?: string }).role === "assistant") yieldedInReply = false;
+	});
+
+	// Claude Code 2.1.327's flagged `Yield`, on every model (findings §94): one
+	// blocking call for a model that wants to wait for an agent, a shell or a
+	// monitor, instead of polling. It ends when a notification is handed to pi
+	// (delivered right after this result), the user queues a message, a
+	// scheduled prompt is due, nothing is left that could report, the call is
+	// aborted, or the cap passes; the reason rides the result as a reminder.
+	pi.registerTool({
+		name: "yield",
+		label: "Wait for background work",
+		...toolRenderers("Wait for background work", {
+			title: () => "",
+			result: (result) => (result.details as { resumed?: string } | undefined)?.resumed,
+		}),
+		description: text.yield.description,
+		parameters: Type.Object({}),
+		// After an Agent or bash call in the same reply, so the work it waits for is registered.
+		executionMode: "sequential",
+		async execute(toolCallId, _params, signal, _onUpdate, ctx) {
+			lastCtx = ctx;
+			const startedAt = Date.now();
+			let end: YieldEnd;
+			if (yieldedInReply) end = { kind: "duplicate" };
+			// A one-shot run blocks on every agent and shell: nothing is in the background to wait for.
+			else if (!sessionOutlivesTurn(ctx.mode)) end = { kind: "nothingRunning" };
+			else {
+				yieldedInReply = true;
+				end = await waitForBackground(
+					{
+						backlog: () => {
+							const query: NotifierBacklogQuery = { coalescing: 0, handed: 0 };
+							pi.events.emit(NOTIFIER_BACKLOG_CHANNEL, query);
+							return query;
+						},
+						running: () => registry.running().length,
+						userMessageQueued: () => ctx.hasPendingMessages(),
+						scheduledDue: () => {
+							const next = cron.nextFireAt();
+							return next !== undefined && next <= Date.now();
+						},
+						onHanded: (listener) => pi.events.on(NOTIFICATION_HANDED_CHANNEL, listener),
+					},
+					signal,
+				);
+			}
+			const resumed = text.yield.resumed({ waitedMs: Date.now() - startedAt, end });
+			pi.events.emit(REMINDER_CHANNEL, { text: resumed, toolCallId } satisfies ReminderPayload);
+			return { content: [{ type: "text", text: text.yield.ended }], details: { end: end.kind, resumed } };
 		},
 	});
 
