@@ -7,8 +7,10 @@
  *
  * This product does not ship /loop and turns cron_create, schedule_wakeup
  * and monitor off, so this text is sent only if a later version turns them
- * on. It is kept complete for that day, and names the task_output tool (not
- * task_list, the to-do list) for finding a running monitor.
+ * on. It is kept complete for that day. A monitor is started with a
+ * deadline and started again when it expires; there is no output tool, so a
+ * monitor's lost task id comes from task_stop, whose answer to an unknown id
+ * lists the background tasks.
  */
 
 import { AUTONOMOUS_LOOP, AUTONOMOUS_LOOP_DYNAMIC, LOOP_FILE_DYNAMIC_SENTINEL, LOOP_FILE_SENTINEL, type LoopFile, type LoopText, type LoopTick } from "../../../extensions/sdk/profile.ts";
@@ -19,7 +21,6 @@ const CRON_CREATE = "cron_create";
 const CRON_DELETE = "cron_delete";
 const MONITOR = "monitor";
 const TASK_STOP = "task_stop";
-const TASK_OUTPUT = "task_output";
 
 /** The self-paced forms report in visible text after arming the wake-up, and say how a stopped loop ended. */
 const VISIBLE_UPDATE = "Write it as normal reply text, since the user cannot see your reasoning, and end the turn with it.";
@@ -40,10 +41,14 @@ const INTERVAL_TABLE = `| Interval          | Cron expression   | Meaning       
 
 **When the interval does not divide its unit evenly** (\`7m\` as \`*/7 * * * *\` leaves an uneven gap from :56 to :00; \`90m\` is 1.5 hours, which cron cannot express), take the nearest even interval, and say which one you rounded to before you schedule it.`;
 
-const ARM_MONITOR = "start one now with `persistent: true`";
+/** The longest deadline a monitor takes, which the loop asks for. */
+const MONITOR_DEADLINE_MS = 1_800_000;
+const ARM_MONITOR = `start one now with \`timeout_ms: ${MONITOR_DEADLINE_MS}\``;
+/** Where a monitor's task id comes from once it is out of view. */
+const LOST_ID = `if its task id has scrolled out of view, call ${TASK_STOP} with an id no task has, and its answer lists every background task`;
 
 function rearmNote(turns: "iterations" | "turns"): string {
-	return `Start it once; on later ${turns}, look with ${TASK_OUTPUT} for a ${MONITOR} already running for it, and skip this step if there is one.`;
+	return `A ${MONITOR} stops after at most ${MONITOR_DEADLINE_MS / 60_000} minutes and tells you so; on later ${turns}, start it again only when no ${MONITOR} for it is still running.`;
 }
 
 /** The self-paced steps shared by both self-paced forms. `marker` is what `prompt` carries; `confirm` what the update reports. */
@@ -58,7 +63,7 @@ function selfPacedSteps(p: { firstStep: string; marker: string; markerNote: stri
    If no further run is needed, stop instead (see the last step). Going on is decided each turn; it is not the default.
 4. **Once the wake-up is set, report briefly**: ${p.confirm}, whether a ${MONITOR} is what will wake the loop, and the fallback delay you chose. ${VISIBLE_UPDATE}
 5. **When a \`<task-notification>\` woke you** instead of the loop prompt, deal with the event as part of the loop's task, then decide in the same way. To go on, call ${WAKEUP} again with ${p.marker} and the same 1200 to 1800 second delay (the ${MONITOR} still wakes the loop; the wake-up is only the fallback), then write the same short update. When the event means the work is done, stop as the next step says.
-6. **Stopping**: when the task is done, more runs cannot help, or the user asked, call ${WAKEUP} with \`stop: true\` and nothing else, and ${TASK_STOP} every ${MONITOR} you started (if its task id has scrolled out of view, ${TASK_OUTPUT} lists it). ${STOP_OUTCOME} Stopping is how a loop normally ends; the user can start it again with /loop.`;
+6. **Stopping**: when the task is done, more runs cannot help, or the user asked, call ${WAKEUP} with \`stop: true\` and nothing else, and ${TASK_STOP} every ${MONITOR} you started (${LOST_ID}). ${STOP_OUTCOME} Stopping is how a loop normally ends; the user can start it again with /loop.`;
 }
 
 /** `/loop <input>`: the model parses out an interval, or paces itself. */
@@ -176,7 +181,7 @@ ${body}`;
 
 const MONITOR_NOTE = `
 
-If a ${MONITOR} is running (check with ${TASK_OUTPUT}), keep \`delaySeconds\` at 1200 to 1800 seconds: the ${MONITOR} wakes the loop and the wake-up is only the fallback. If a \`<task-notification>\` woke you, deal with the event before deciding whether to go on. To stop the loop, call ${WAKEUP} with \`stop: true\` and ${TASK_STOP} the ${MONITOR} (if its task id has scrolled out of view, ${TASK_OUTPUT} lists it).`;
+If a ${MONITOR} is running, keep \`delaySeconds\` at 1200 to 1800 seconds: the ${MONITOR} wakes the loop and the wake-up is only the fallback. If a \`<task-notification>\` woke you, deal with the event before deciding whether to go on. To stop the loop, call ${WAKEUP} with \`stop: true\` and ${TASK_STOP} the ${MONITOR} (${LOST_ID}).`;
 
 function keepAlive(marker: string, extra = ""): string {
 	return `A ${WAKEUP} call (not a cron job) scheduled this run. To keep the loop going${extra}, call ${WAKEUP} again at the end of this turn with \`prompt\` set to the exact marker \`${marker}\`, and \`noop\` set to \`true\` if this run changed nothing or \`false\` if it did. Without that call the loop ends after this run.${MONITOR_NOTE}`;

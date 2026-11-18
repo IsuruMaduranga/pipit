@@ -1,7 +1,7 @@
 /**
  * What the profile declares for the base to apply: its own settings, a
- * thinking level per model tier and an OpenRouter quantization floor per
- * vendor. The base refuses a malformed declaration at load; these tests ask
+ * thinking level per model tier, an OpenRouter quantization floor per
+ * vendor, and the background tools it leaves out. The base refuses a malformed declaration at load; these tests ask
  * its checks directly and pin what the product chose.
  */
 import { describe, expect, it } from "vitest";
@@ -15,6 +15,11 @@ describe("the profile's declarations", () => {
 		const switchFor = { type: "boolean", project: true, description: expect.any(String) };
 		expect(profile.settings).toEqual({ tierNotice: switchFor, reasoningNotice: switchFor });
 		expect(productSettingProblems(profile.settings ?? {})).toEqual([]);
+	});
+
+	it("turns task_output off: a background task's result arrives as its notification", () => {
+		expect(profile.tools.task_output).toEqual({ enabled: false });
+		expect(profile.tools.yield).toBeUndefined();
 	});
 
 	it("starts a model of every tier at low", () => {

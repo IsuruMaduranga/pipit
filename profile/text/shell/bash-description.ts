@@ -11,16 +11,18 @@
  * the session's working directory (lib/shell-run/shell-tool.ts), so the texts
  * say that a directory change is lost between calls.
  *
- * Sentences naming monitor, Agent or edit are cut by index.ts
+ * Sentences naming monitor, yield, Agent or edit are cut by index.ts
  * when those tools are off; their exact strings are listed there.
  */
 
 import type { DescriptionForm } from "../../../extensions/sdk/profile.ts";
 
-/** Sentences naming monitor or edit, which index.ts cuts when the tool is off. */
+/** Sentences naming monitor, yield or edit, which index.ts cuts when the tool is off. */
 export const BASH_MONITOR_WAIT = " A `sleep` in the foreground is blocked; to wait until something is true, run an until-loop under monitor.";
 export const BASH_MONITOR_STREAM = "  - To follow a background process event by event, use the monitor tool: every line it prints reaches you as a notification. To wait only for the end of a command, run it with run_in_background instead.\n";
 export const BASH_MONITOR_SLEEP = "  - A command that opens with a long `sleep` is blocked. To wait for a condition, run an until-loop under monitor (for example `until <check>; do sleep 2; done`) and you are notified when the loop ends. Do not string short sleeps together to get past the block.\n";
+export const BASH_YIELD_WAIT = " When nothing else is left for you to do until background work reports, call yield to wait for it.";
+export const BASH_YIELD_LINE = "  - When nothing else is left for you to do until a background command or agent reports, call yield to wait for it.\n";
 export const BASH_EDIT_LINE = " - To change a file: the edit tool, not sed or awk\n";
 
 /** The short form's bullet against shell reads, sent only when auto mode is off. */
@@ -32,7 +34,7 @@ export const BASH_SHORT_DESCRIPTION = `Runs a bash command and returns what it p
 - Each call begins in the session's working directory; a \`cd\` in one call has no effect on the next. Use absolute paths: a \`cd\` inside a compound command can cause a permission prompt. Shell state such as variables and functions is not kept either.
 ${BASH_AVOID_SHELL_READS_LINE}- You see the output; the user may not.
 - \`timeout\` is in milliseconds: 120000 by default, at most 600000 for a command in the foreground.
-- \`run_in_background\` detaches the command: it goes on running across turns, and you are woken when it exits. Do not add \`&\`.${BASH_MONITOR_WAIT}
+- \`run_in_background\` detaches the command: it goes on running across turns, and you are woken when it exits. Do not add \`&\`.${BASH_MONITOR_WAIT}${BASH_YIELD_WAIT}
 
 # Git
 - Interactive flags (\`-i\`, as in \`git rebase -i\` or \`git add -i\`) cannot work here.
@@ -67,7 +69,7 @@ The shell can do these things too, but the dedicated tools are easier for the us
 ${BASH_MONITOR_STREAM}  - For a long command whose end you want to hear about, use \`run_in_background\`; no sleep is needed.
   - Do not rerun a failing command in a sleep loop. Find out why it fails.
   - A background command you started with \`run_in_background\` tells you when it ends, so do not poll it.
-${BASH_MONITOR_SLEEP} - Run \`find\` from \`.\` or a specific directory, never from \`/\`: walking the whole filesystem can use up the machine's resources.
+${BASH_YIELD_LINE}${BASH_MONITOR_SLEEP} - Run \`find\` from \`.\` or a specific directory, never from \`/\`: walking the whole filesystem can use up the machine's resources.
  - In \`find -regex\` with alternatives, list the longest alternative first: \`'.*\\.\\(tsx\\|ts\\)'\` finds both kinds of file, while \`'.*\\.\\(ts\\|tsx\\)'\` misses the \`.tsx\` files without any warning.
 
 

@@ -6,12 +6,13 @@
  */
 
 import type { LiveTools, ShellText } from "../../../extensions/sdk/profile.ts";
-import { BASH_EDIT_LINE, BASH_MONITOR_SLEEP, BASH_MONITOR_STREAM, BASH_MONITOR_WAIT, BASH_PARAMS, bashDescription } from "./bash-description.ts";
-import { POWERSHELL_EDIT_LINE, POWERSHELL_MONITOR_CLAUSE, POWERSHELL_NO_TASK_TOOLS, POWERSHELL_TASK_TOOLS, powerShellToolDescription } from "./powershell-description.ts";
+import { BASH_EDIT_LINE, BASH_MONITOR_SLEEP, BASH_MONITOR_STREAM, BASH_MONITOR_WAIT, BASH_PARAMS, BASH_YIELD_LINE, BASH_YIELD_WAIT, bashDescription } from "./bash-description.ts";
+import { POWERSHELL_EDIT_LINE, POWERSHELL_MONITOR_CLAUSE, POWERSHELL_NO_TASK_TOOLS, POWERSHELL_TASK_TOOLS, POWERSHELL_YIELD_CLAUSE, powerShellToolDescription } from "./powershell-description.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
 
 
 const BASH_PASSAGES: ToolPassages = {
+	yield: [BASH_YIELD_WAIT, BASH_YIELD_LINE],
 	monitor: [
 		[BASH_MONITOR_WAIT, " A `sleep` in the foreground is blocked."],
 		BASH_MONITOR_STREAM,
@@ -22,12 +23,9 @@ const BASH_PASSAGES: ToolPassages = {
 	edit: [BASH_EDIT_LINE],
 };
 
-/** Names both task tools: the shorter sentence when either is off. */
-const PS_TASK_TOOLS = [[POWERSHELL_TASK_TOOLS, POWERSHELL_NO_TASK_TOOLS]] as const;
-
 const POWERSHELL_PASSAGES: ToolPassages = {
-	task_output: PS_TASK_TOOLS,
-	task_stop: PS_TASK_TOOLS,
+	yield: [POWERSHELL_YIELD_CLAUSE],
+	task_stop: [[POWERSHELL_TASK_TOOLS, POWERSHELL_NO_TASK_TOOLS]],
 	monitor: [POWERSHELL_MONITOR_CLAUSE],
 	edit: [POWERSHELL_EDIT_LINE],
 };

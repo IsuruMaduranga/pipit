@@ -60,12 +60,15 @@ export const profile: Profile = {
 		ls: off,
 		// Reads which configurable variables exist and which are set, never a value.
 		config_status: { readOnly: true, autoAllow: true },
-		// Scheduling and watching are not part of the product; background shells and their output are.
+		// Scheduling and watching are not part of the product; background shells and agents are. Their results
+		// arrive as notifications, a shell's output file is read with read, and yield waits for them: an output
+		// tool answered a running agent with "still running" at once, and a model that wanted to wait polled it.
 		cron_create: off,
 		cron_list: off,
 		cron_delete: off,
 		schedule_wakeup: off,
 		monitor: off,
+		task_output: off,
 	},
 	childExtensions: ["extensions/ballerina/child.ts"],
 	// Config.toml holds the values of an integration's configurable variables: the model never reads it.

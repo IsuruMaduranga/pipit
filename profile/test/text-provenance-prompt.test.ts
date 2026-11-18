@@ -116,6 +116,21 @@ describe("the system prompt, subagent and hand-back words", () => {
 		expect(mentions(words(ALL_LIVE), "SendMessage", ENGLISH)).toHaveLength(6);
 	});
 
+	it("tell the model to wait for an agent's notification or call yield, never to fetch its output", () => {
+		const subagents = profile.text({ live: { has: (tool) => tool !== "task_output" } }).subagents!;
+		for (const form of FORMS) {
+			const text = subagents.agentDescription({ form, configDir: brand.stateDir });
+			expect(mentions(text, "task_output", ENGLISH)).toEqual([]);
+			expect(text).toContain("call yield to wait for it");
+			expect(text).toContain("End a run you no longer need with task_stop");
+		}
+		// pi holds a message to a running agent until it next calls a tool or ends its reply.
+		expect(subagents.sendMessageDescription).toContain("the message is queued until the agent next calls a tool or finishes the reply it is writing");
+		// The base's list_agents shows `running`, `idle` and `finished`.
+		expect(subagents.listAgentsDescription).toContain("`idle` means its turn is over");
+		expect(subagents.listAgentsDescription).not.toContain("resident");
+	});
+
 	it("have every passage their tables cut", () => {
 		expect(stalePassages(texts)).toEqual([]);
 	});

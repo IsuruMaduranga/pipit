@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import type { LiveTools } from "../../extensions/lib/profile/live-tools.ts";
 import type { DescriptionForm } from "../../extensions/lib/profile/tool-variants.ts";
 import { profile } from "../index.ts";
-import { type EnglishPhrases, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
+import { type EnglishPhrases, mentions, type NamedText, stalePassages, toolLeaks } from "../../test/unit/helpers/tool-mentions.ts";
 
 const FORMS: DescriptionForm[] = ["short", "long"];
 
@@ -43,6 +43,7 @@ function toolTexts(live: LiveTools): NamedText[] {
 	if (toolSearch.listingClose) push("listing close", "tool-search", toolSearch.listingClose, "tool_search");
 	push("monitor", "background", background.monitor.description, "monitor");
 	push("task_output", "background", background.tasks.outputDescription, "task_output");
+	push("yield", "background", background.yield.description, "yield");
 	for (const firm of [true, false]) push(`auto-mode note${firm ? " firm" : ""}`, undefined, permissions.autoModeNote({ firm }));
 	for (const edition of ["core", "desktop", "unknown"] as const) push(`powershell ${edition}`, "bash", shell.powershellDescription({ edition }), "powershell");
 	return out;
@@ -116,6 +117,17 @@ describe("the product's tool, mode and side-call words", () => {
 		expect(bash).toContain("A `sleep` in the foreground is blocked.");
 		expect(bash).not.toMatch(/\bmonitor\b/);
 		expect(off.background!.tasks.outputDescription).toContain("(background subagent or background bash)");
+	});
+
+	it("send a session without task_output to notifications, read and yield, never to task_output", () => {
+		const off = profile.text({ live: { has: (tool) => tool !== "task_output" } });
+		const words = allWords({ has: (tool) => tool !== "task_output" }).filter((text) => text !== off.background!.tasks.outputDescription);
+		for (const text of words) expect(mentions(text, "task_output", ENGLISH), text.slice(0, 80)).toEqual([]);
+		for (const form of FORMS) expect(off.shell!.bashDescription({ form, autoMode: false, searchTools: false })).toContain("call yield to wait for it");
+		expect(off.shell!.powershellDescription({ edition: "core" })).toContain("task_stop stops it");
+		expect(off.shell!.powershellDescription({ edition: "core" })).toContain("call yield to wait for it");
+		expect(off.background!.monitor.description).toContain("call yield");
+		expect(JSON.stringify(off.background!.monitor.params({ defaultTimeoutMs: 1, maxTimeoutMs: 2 }))).not.toContain("persistent");
 	});
 
 	it("keep the plan-mode block the same for a given plan file and state", () => {

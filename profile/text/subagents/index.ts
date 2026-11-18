@@ -13,15 +13,10 @@ import { agentDescription } from "./agent-description.ts";
 import { GUIDE_CONTINUE, guideAgent } from "./guide-agent.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
 
-/** Names both background-task tools: cut when either is off. */
-const TASK_TOOLS_PASSAGE = [
-    "- Reach for task_output only when nothing you do next can proceed without the result (block=true waits for it), and end a run with task_stop. You must fetch both through tool_search before the first call, since they are deferred.\n",
-] as const;
-
 /** The Agent description's passages naming a sibling tool. pi's --exclude-tools can take SendMessage out alone (a deferred SendMessage is still one the session can have). */
 const AGENT_PASSAGES: ToolPassages = {
-    task_output: TASK_TOOLS_PASSAGE,
-    task_stop: TASK_TOOLS_PASSAGE,
+    yield: ["- When nothing else is left for you to do until an agent reports, call yield to wait for it.\n"],
+    task_stop: ["- End a run you no longer need with task_stop. It is deferred, so fetch it through tool_search before the first call.\n"],
     SendMessage: [
         ["- To continue an agent you already started, with its context intact, use SendMessage with its name or ID. A new Agent call starts from scratch", "- A new Agent call starts from scratch"],
         ["- SendMessage with the agent's name or ID in `to` resumes an agent you already started, with its full context. A new Agent call starts an agent", "- A new Agent call starts an agent"],
@@ -83,7 +78,7 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
             name: "What to call this run; <agent>-<n> if omitted",
         },
         sendMessageDescription: withoutOff(
-            'Send a message to an agent you started earlier, addressed by the name its spawn result gave (or its task id); list_agents shows the names of running and finished agents. A background agent that is still resident receives it at once: during a turn the message folds into the current work, and between turns it triggers a fresh turn. An agent that already finished picks up again from its saved session, everything it knew intact. Its replies reach you as notifications. (A subagent reports to the main conversation with its own SendMessage, to: "main".)',
+            'Send a message to an agent you started earlier, addressed by the name its spawn result gave (or its task id); list_agents shows the names of running and finished agents. A background agent that is still resident gets it live: in the middle of a turn the message is queued until the agent next calls a tool or finishes the reply it is writing, and between turns it starts a fresh turn. An agent that already finished picks up again from its saved session, everything it knew intact. Its replies reach you as notifications. (A subagent reports to the main conversation with its own SendMessage, to: "main".)',
             live,
             SEND_MESSAGE_PASSAGES,
         ),
@@ -93,7 +88,7 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
             summary: "A 5 to 10 word preview shown in the UI",
         },
         listAgentsDescription: withoutOff(
-            "List the agents started in this session, with their names, types, and status, to see which ones SendMessage can reach. `running` means working now; `resident` means idle but reachable live; `finished` means it can be resumed from its session. This lists started runs, not the agent catalog (Agent with action:'list' shows that).",
+            "List the agents started in this session, with their names, types, and status, to see which ones SendMessage can reach. `running` means working on a turn now; `idle` means its turn is over and it waits for a message; `finished` means it can be resumed from its session. This lists started runs, not the agent catalog (Agent with action:'list' shows that).",
             live,
             LIST_AGENTS_PASSAGES,
         ),

@@ -37,7 +37,6 @@ const LISTING_HINTS: Readonly<Record<string, string>> = {
 	task_update: "Load it to mark a to-do item started or done, or to change or link one.",
 	task_get: "Load it to read one to-do item in full, with the items it blocks or waits on.",
 	task_list: "Load it to see the whole to-do list and what is still open.",
-	task_output: "Load it when your next step needs a background task's output before its notification arrives, or to look at one while it runs.",
 	task_stop: "Load it to end a background shell or agent you no longer need.",
 	SendMessage: "Load it to message another agent: to give one you started more instructions or pick up one that has finished, or, as a fork, to report to the session that started you.",
 	enter_plan_mode: "Load it before a change across several files whose design is still open, or when the user wants a plan first.",

@@ -121,17 +121,20 @@ ${POWERSHELL_EDIT_LINE}    - To write a file: the write tool, not Set-Content or
     - Before a destructive command (git push --force, git checkout --, git reset --hard), look for a safer way to reach the same goal, and use the destructive one only when it really is the best choice.
     - Unless the user asks for it, do not bypass hooks (--no-verify) or commit signing (-c commit.gpgsign=false, --no-gpg-sign). When a hook fails, find and fix the cause.`;
 
-/** The background-run sentence naming the task tools, and its form when either is off. */
+/** The background-run sentence naming task_stop, and its form when task_stop is off. */
 export const POWERSHELL_TASK_TOOLS =
-	": you get a task id at once, a task notification when it ends, and task_output and task_stop to read its output or stop it (both are deferred, so load them with tool_search first). In a one-shot print or json session the command instead runs to the end within the foreground timeout and returns its output directly.";
+	": you get a task id at once and a task notification when it ends, and task_stop stops it (deferred, so load it with tool_search first). In a one-shot print or json session the command instead runs to the end within the foreground timeout and returns its output directly.";
 export const POWERSHELL_NO_TASK_TOOLS =
 	": you get a task id at once and a task notification when it ends. In a one-shot print or json session the command instead runs to the end within the foreground timeout and returns its output directly.";
 
 /** The sleep-guard clause naming monitor. */
 export const POWERSHELL_MONITOR_CLAUSE = " To wait until a condition holds, use the monitor tool (deferred, so load it first with tool_search select:monitor).";
 
-/** The notes after the body: background runs and the sleep guard. */
-export const POWERSHELL_ADDENDUM = `\n\nA background run starts at once${POWERSHELL_TASK_TOOLS} A command in the foreground that begins with \`Start-Sleep\` is blocked.${POWERSHELL_MONITOR_CLAUSE}`;
+/** The sentence pointing at yield, cut when yield is off. */
+export const POWERSHELL_YIELD_CLAUSE = " When nothing else is left for you to do until background work reports, call yield to wait for it.";
+
+/** The notes after the body: background runs, the sleep guard and waiting. */
+export const POWERSHELL_ADDENDUM = `\n\nA background run starts at once${POWERSHELL_TASK_TOOLS} A command in the foreground that begins with \`Start-Sleep\` is blocked.${POWERSHELL_MONITOR_CLAUSE}${POWERSHELL_YIELD_CLAUSE}`;
 
 /** The body for the detected edition, without the addendum. */
 export function powerShellDescriptionBody(edition: PowerShellEditionName): string {

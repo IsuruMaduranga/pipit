@@ -4,8 +4,10 @@
  * The short form goes to frontier and workhorse models; the long form, with
  * usage notes, the fork guidance, the briefing section and worked examples,
  * goes to cheap and tiny ones (lib/profile/tool-variants.ts). Both end with
- * `## While an agent runs`: `task_output` and `task_stop`, the one-shot print
- * session, self-contained tasks, run names and `action: "list"`. A fork
+ * `## While an agent runs`: waiting with `yield`, ending a run with
+ * `task_stop`, the one-shot print session, self-contained tasks, run names
+ * and `action: "list"`. There is no output tool: a background agent's report
+ * arrives only as its notification. A fork
  * rejects a `model` override. Agent definitions are named by the folder the
  * base passes (`configDir`).
  */
@@ -115,7 +117,8 @@ Agent({
 /** The closing section of both forms. */
 export const AGENT_HOW_AGENTS_RUN = `## While an agent runs
 
-- Reach for task_output only when nothing you do next can proceed without the result (block=true waits for it), and end a run with task_stop. You must fetch both through tool_search before the first call, since they are deferred.
+- When nothing else is left for you to do until an agent reports, call yield to wait for it.
+- End a run you no longer need with task_stop. It is deferred, so fetch it through tool_search before the first call.
 - One-shot print sessions differ: there the call waits and hands back the report directly, with no notification afterwards.
 - Write the task so it needs no follow-up: the agent has no way to ask you anything.
 - Each run is named. SendMessage talks to a run while it is working and resumes it once it is done. \`action: "list"\` shows the agent catalog once more.`;

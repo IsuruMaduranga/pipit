@@ -59,6 +59,7 @@ export const SECTION_TOOLS: ReadonlySet<string> = new Set([
 	"skill",
 	"Agent",
 	"ask_user_question",
+	"read",
 	"task_output",
 	"task_stop",
 	"create_integration",

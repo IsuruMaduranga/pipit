@@ -137,7 +137,7 @@ describe("the # Ballerina section", () => {
 	});
 
 	it("reads cleanly with any one tool off, and with the file tools and diagnostics off together", () => {
-		const cases = [[], ...[...SECTION_TOOLS].map((tool) => [tool]), ["write", "edit"], ["write", "edit", "lsp_diagnostics"], ["write", "edit", "skill"], ["task_output", "task_stop"], [...SECTION_TOOLS]];
+		const cases = [[], ...[...SECTION_TOOLS].map((tool) => [tool]), ["write", "edit"], ["write", "edit", "lsp_diagnostics"], ["write", "edit", "skill"], ["task_output", "task_stop"], ["task_output", "read"], [...SECTION_TOOLS]];
 		for (const [off, features] of cases.flatMap((off) => [[off, ALL_FEATURES] as const, [off, NO_LSP] as const])) {
 			const text = render(without(...off), features) ?? "";
 			const label = `off: ${off.join(", ") || "nothing"}${features === NO_LSP ? ", the lsp feature" : ""}`;
@@ -321,6 +321,15 @@ describe("the # Ballerina section", () => {
 		expect(text).toContain("The user's request comes before the rules in this part, and it is answered with the lookups the task needs, under the same cost rule as any other lookup");
 		expect(text).toContain("Never answer it by reading every readme section, listing every symbol, or reading folders on disk.");
 		expect(text).toContain("Never web-search for a first-party Ballerina API fact");
+	});
+
+	it("sends the model to a service's output file with read when the session has no output tool", () => {
+		const fileRoute = "read the output file its launch result names with `read`";
+		expect(render(without("task_output"))).toContain(fileRoute);
+		expect(render(without("task_output"))).not.toMatch(/task_output/);
+		expect(render()).toContain("read its output with `task_output`");
+		expect(render()).not.toContain(fileRoute);
+		expect(render(without("task_output", "read"))).not.toMatch(/task_output|`read`/);
 	});
 
 	it("builds to check its own changes, and runs the program or its tests only when the user asks", () => {
