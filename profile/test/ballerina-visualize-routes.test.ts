@@ -7,6 +7,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { allowedHost, MODEL_TIMEOUT_MS, modelRequest, projectInfoRequest, type Route, type RouteContext, route, sameToken } from "../extensions/ballerina/visualize/routes.ts";
 
@@ -76,6 +77,7 @@ describe("route", () => {
 	it("picks the package by name, or the only one", () => {
 		expect(get(`/${TOKEN}/api/design`)).toEqual({ kind: "design", pkg: context.packages[0] });
 		expect(get(`/${TOKEN}/api/artifacts?package=orders`)).toEqual({ kind: "artifacts", pkg: context.packages[0] });
+		expect(get(`/${TOKEN}/api/components?package=orders`)).toEqual({ kind: "components", pkg: context.packages[0] });
 		expect(errorOf(get(`/${TOKEN}/api/design?package=billing`))).toEqual([404, 'The project has no integration named "billing".']);
 		const two = { ...context, packages: [...context.packages, { name: "billing", dir: root }] };
 		expect(errorOf(get(`/${TOKEN}/api/design`, two))[0]).toBe(400);
@@ -118,6 +120,10 @@ describe("the language-server requests", () => {
 		expect(modelRequest({ kind: "flow", pkg, file: "/p/main.bal", start: { line: 1, offset: 0 }, end: { line: 4, offset: 1 } })).toMatchObject({
 			method: "flowDesignService/getFlowModel",
 			params: { filePath: "/p/main.bal", startLine: { line: 1, offset: 0 }, endLine: { line: 4, offset: 1 }, forceAssign: true },
+		});
+		expect(modelRequest({ kind: "components", pkg })).toMatchObject({
+			method: "ballerinaPackage/components",
+			params: { documentIdentifiers: [{ uri: pathToFileURL(pkgDir).href }] },
 		});
 		expect(projectInfoRequest(pkg)).toMatchObject({ method: "designModelService/projectInfo", params: { projectPath: pkgDir } });
 		expect(MODEL_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);

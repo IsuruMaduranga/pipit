@@ -11,11 +11,12 @@ import "@vscode/codicons/dist/codicon.css";
 import "theme:light";
 import "theme:dark";
 import "./page.css";
+import { agentFlow, type Components, functionPlaces, keepChildren, toolKey, toolNames } from "./agent-tools";
 
 type Position = { line: number; offset: number };
 type Location = { filePath?: string; fileName?: string; startLine: Position; endLine: Position };
-type Item = { key: string; label: string; verb?: string; location?: Location; children?: Item[] };
-type Sidebar = { entryPoints: Item[]; functions: Item[] };
+type Item = { key: string; label: string; verb?: string; location?: Location; children?: Item[]; agent?: boolean };
+type Sidebar = { entryPoints: Item[]; agents: Item[]; functions: Item[] };
 type View = { kind: "overview" } | { kind: "flow"; key?: string; title: string; location: Location };
 type Load<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "failed"; message: string };
 /** A model with the package and view it was fetched for: a render never hands one view's model to the other's diagram. */
@@ -24,9 +25,11 @@ type OverviewProps = React.ComponentProps<typeof OverviewDiagram>;
 type DesignModel = OverviewProps["project"];
 /** The flow model, as the flow diagram takes it (`flowDesignService/getFlowModel`'s `flowModel`). */
 type FlowModel = React.ComponentProps<typeof FlowDiagram>["model"];
+type FlowNode = FlowModel["nodes"][number];
 /** What a click in the overview hands back: a function, a resource, or the automation. */
 type OverviewTarget = Parameters<OverviewProps["onFunctionSelect"]>[0] | Parameters<OverviewProps["onAutomationSelect"]>[0];
-type Drawn = { kind: "overview"; design: DesignModel } | { kind: "flow"; flow: FlowModel };
+/** `agent`: the flow is an agent's declaration, drawn the way the designer's agent view does. */
+type Drawn = { kind: "overview"; design: DesignModel } | { kind: "flow"; flow: FlowModel; agent: boolean };
 type Shown = { state: "loading" } | { state: "ready"; drawn: Drawn; pkg: string; view: View } | { state: "failed"; message: string; pkg: string; view: View };
 type Connection = "live" | "updating" | "disconnected" | "ended";
 type ProjectInfo = { product: string; name: string; packages: string[]; initialPackage?: string };
@@ -82,6 +85,9 @@ function flowParams(pkg: string, location: Location): Record<string, string> {
     };
 }
 
+/** The flow model of the function, resource or declaration at `location`. */
+const flowOf = (pkg: string, location: Location) => api<{ flowModel?: FlowModel }>("flow", flowParams(pkg, location)).then((answer) => answer.flowModel);
+
 /** Whether a `changed` event says the project's package list may have changed. */
 function changedProject(data: string): boolean {
     try {
@@ -118,18 +124,42 @@ function sidebarOf(result: { artifacts?: Record<string, Record<string, Artifact>
         const children = Object.values(entry.children ?? {}).filter((child) => child.location).map((child) => childItem(key, child));
         entryPoints.push({ key, label: name, children, location: children.length === 0 ? entry.location : undefined });
     }
-    const functions = Object.values(artifacts.Functions ?? {})
-        .filter((fn) => fn.location)
-        .map((fn) => ({ key: `function:${fn.name}`, label: fn.name ?? "?", location: fn.location }))
-        .sort((a, b) => a.label.localeCompare(b.label));
-    return { entryPoints, functions };
+    const named = (group: string, prefix: string, agent?: boolean): Item[] =>
+        Object.values(artifacts[group] ?? {})
+            .filter((artifact) => artifact.location)
+            .map((artifact) => ({ key: `${prefix}:${artifact.name}`, label: artifact.name ?? "?", location: artifact.location, agent }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+    return { entryPoints, agents: named("Agents", "agent", true), functions: named("Functions", "function") };
 }
 
-const allItems = (sidebar: Sidebar): Item[] => [...sidebar.entryPoints.flatMap((item) => [item, ...(item.children ?? [])]), ...sidebar.functions];
+const allItems = (sidebar: Sidebar): Item[] => [
+    ...[...sidebar.entryPoints, ...sidebar.agents].flatMap((item) => [item, ...(item.children ?? [])]),
+    ...sidebar.functions,
+];
+
 const baseName = (path = "") => path.split(/[\\/]/).pop() ?? "";
 /** The sidebar item at a location, matched by file name and start line: how a click in the overview finds its item. */
 const itemAt = (sidebar: Sidebar | undefined, location: Location) =>
     sidebar && allItems(sidebar).find((item) => item.location && baseName(item.location.filePath ?? item.location.fileName) === baseName(location.filePath ?? location.fileName) && item.location.startLine.line === location.startLine.line);
+
+// ---- Agent tools (agent-tools.ts holds the logic).
+
+/** The sidebar with each agent's tools as its children. Rejects when the language server cannot answer. */
+async function withTools(sidebar: Sidebar, pkg: string): Promise<Sidebar> {
+    if (sidebar.agents.length === 0) return sidebar;
+    const [places, flows] = await Promise.all([
+        api<Components>("components", { package: pkg }).then(functionPlaces),
+        Promise.all(sidebar.agents.map((agent) => (agent.location ? flowOf(pkg, agent.location) : undefined))),
+    ]);
+    const agents = sidebar.agents.map((agent, index) => {
+        const children = toolNames(flows[index]).flatMap((name) => {
+            const location = places.get(name);
+            return location ? [{ key: toolKey(agent.key, name), label: name, location }] : [];
+        });
+        return { ...agent, children };
+    });
+    return { ...sidebar, agents };
+}
 
 // ---- Keeping the overview's pan and zoom across a refresh.
 // The overview fits itself to the screen after every model change, and draws
@@ -310,11 +340,22 @@ function App() {
         (async () => {
             let items: Sidebar | undefined;
             try {
-                items = sidebarOf(await api("artifacts", { package: pkg }));
-                if (!cancelled) setSidebar({ state: "ready", value: items });
+                const fresh = sidebarOf(await api("artifacts", { package: pkg }));
+                items = fresh;
+                // The agents keep their last known tools on screen until the new lists arrive.
+                if (!cancelled) setSidebar((previous) => ({ state: "ready", value: { ...fresh, agents: keepChildren(fresh.agents, previous.state === "ready" ? previous.value.agents : undefined) } }));
             } catch (error) {
                 if (!cancelled) setSidebar({ state: "failed", message: String((error as Error).message) });
             }
+            // The agents' tools take a request per agent: the view waits for them only when it shows a tool.
+            const withAgentTools = items && withTools(items, pkg);
+            withAgentTools?.then(
+                (value) => {
+                    if (!cancelled) setSidebar({ state: "ready", value });
+                },
+                // The sidebar keeps the tools it last had; a tool's own view reports the failure.
+                noop,
+            );
             try {
                 let drawn: Drawn | undefined;
                 if (view.kind === "overview") {
@@ -323,10 +364,13 @@ function App() {
                     if (refresh) keepViewport(overviewHost.current);
                 } else {
                     // A refresh finds the item again: an edit above it moves its lines.
-                    const item = view.key && items ? allItems(items).find((candidate) => candidate.key === view.key) : undefined;
+                    const find = (sidebar?: Sidebar) => (view.key && sidebar ? allItems(sidebar).find((candidate) => candidate.key === view.key) : undefined);
+                    // `items` has no tool children, so a tool's view never runs on its last known, stale place.
+                    const item = find(items) ?? (view.key && withAgentTools ? find(await withAgentTools) : undefined);
                     if (view.key && items && !item) throw new Error(`${view.title} is no longer in the code.`);
-                    const flow = (await api<{ flowModel?: FlowModel }>("flow", flowParams(pkg, item?.location ?? view.location))).flowModel;
-                    if (flow) drawn = { kind: "flow", flow };
+                    const flow = await flowOf(pkg, item?.location ?? view.location);
+                    const agent = item?.agent === true;
+                    if (flow) drawn = { kind: "flow", flow: agent ? agentFlow(flow, view.title) : flow, agent };
                     if (refresh) keepFlowViewport(flowHost.current);
                 }
                 if (cancelled) return;
@@ -354,6 +398,21 @@ function App() {
         },
         [sidebar],
     );
+    /** An agent call's "Open Agent": the agent of that name in the sidebar, as the designer opens the declaration. */
+    const toAgent = useCallback(
+        (node: FlowNode) => {
+            const name = node.properties?.connection?.value;
+            const agent = sidebar.state === "ready" && typeof name === "string" ? sidebar.value.agents.find((item) => item.label === name.trim()) : undefined;
+            if (agent) openFlow(agent.label, agent.location, agent.key);
+        },
+        [sidebar, openFlow],
+    );
+    /** A tool on the agent card: its function's flow, as the designer opens it, through its item under the open agent. */
+    const toTool = (tool: { name: string }) => {
+        const key = view.kind === "flow" ? toolKey(view.key, tool.name) : undefined;
+        const target = sidebar.state === "ready" && key ? allItems(sidebar.value).find((item) => item.key === key) : undefined;
+        if (target) openFlow(target.label, target.location, target.key);
+    };
     const fromOverview = useCallback(
         (target: OverviewTarget) => {
             const title = "accessor" in target ? `${target.accessor.toUpperCase()} /${target.path.replace(/^\//, "")}` : target.name || "Automation";
@@ -369,16 +428,15 @@ function App() {
     const current = view.kind === "flow" ? view.key : "overview";
     const shown: Shown = model.state !== "loading" && model.pkg === pkg && model.view === view ? model : { state: "loading" };
     const drawn = shown.state === "ready" ? shown.drawn : undefined;
-    const empty = drawn?.kind === "overview" && isEmptyDesign(drawn.design) && (!items || items.functions.length === 0);
+    const empty = drawn?.kind === "overview" && isEmptyDesign(drawn.design) && (!items || items.functions.length + items.agents.length === 0);
 
-    const itemButton = (item: Item) => (
-        <li key={item.key}>
-            <button aria-current={current === item.key} title={item.label} onClick={() => openFlow(item.verb ? `${item.verb} ${item.label}` : item.label, item.location, item.key)}>
-                {item.verb && <span className="verb">{item.verb}</span>}
-                {item.label}
-            </button>
-        </li>
+    const button = (item: Item) => (
+        <button aria-current={current === item.key} title={item.label} onClick={() => openFlow(item.verb ? `${item.verb} ${item.label}` : item.label, item.location, item.key)}>
+            {item.verb && <span className="verb">{item.verb}</span>}
+            {item.label}
+        </button>
     );
+    const itemButton = (item: Item) => <li key={item.key}>{button(item)}</li>;
 
     return (
         <div className="view" data-theme={dark ? "dark" : "light"}>
@@ -428,6 +486,19 @@ function App() {
                                 ),
                             )}
                         </ul>
+                        {items.agents.length > 0 && (
+                            <>
+                                <h2>Agents</h2>
+                                <ul>
+                                    {items.agents.map((agent) => (
+                                        <li key={agent.key}>
+                                            {button(agent)}
+                                            {agent.children && agent.children.length > 0 && <ul aria-label={`Tools of ${agent.label}`}>{agent.children.map(itemButton)}</ul>}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </>
+                        )}
                         <h2>Functions</h2>
                         {items.functions.length === 0 && <p className="muted">None yet</p>}
                         <ul>{items.functions.map(itemButton)}</ul>
@@ -457,9 +528,21 @@ function App() {
                     </div>
                 )}
                 {drawn?.kind === "flow" && view.kind === "flow" && (
-                    <div className="canvas view-only" ref={flowHost} key={`flow:${pkg}:${view.key ?? view.title}:${dark}`}>
+                    <div
+                        className="canvas view-only"
+                        ref={flowHost}
+                        key={`flow:${pkg}:${view.key ?? view.title}:${dark}`}
+                        onContextMenuCapture={(event) => event.stopPropagation()}
+                    >
                         <DrawingGuard onRetry={() => setVersion((v) => v + 1)}>
-                            <FlowDiagram model={drawn.flow} readOnly={true} />
+                            {drawn.agent ? (
+                                // The card follows a tool click only when the diagram is not read only, which takes
+                                // these three callbacks too, as the designer's agent view passes them. Right clicks
+                                // stop at the canvas (onContextMenuCapture): the card's menu offers only edits.
+                                <FlowDiagram model={drawn.flow} readOnly={false} onAddNode={noop} onDeleteNode={noop} onNodeSelect={noop} isAgentFocusView={true} agentNode={{ goToTool: toTool }} />
+                            ) : (
+                                <FlowDiagram model={drawn.flow} readOnly={true} goToAgent={toAgent} />
+                            )}
                         </DrawingGuard>
                     </div>
                 )}

@@ -14,7 +14,7 @@ import { randomBytes } from "node:crypto";
 import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join, relative } from "node:path";
-import { type ModelRequest, modelRequest, type Route, route, type ViewPackage } from "./routes.ts";
+import { type ModelRequest, modelRequest, type ModelRoute, route, type ViewPackage } from "./routes.ts";
 
 export interface ViewProject {
 	/** Shown as the page's title. */
@@ -115,7 +115,7 @@ export async function startViewerServer(options: ViewerOptions): Promise<ViewerS
 
 	const context = () => ({ token, port, assets, packages: options.project().packages, realpath: realpathOrUndefined });
 
-	const answerModel = async (res: ServerResponse, target: Extract<Route, { kind: "design" | "artifacts" | "flow" }>, head: boolean) => {
+	const answerModel = async (res: ServerResponse, target: ModelRoute, head: boolean) => {
 		try {
 			sendJson(res, 200, await options.request(modelRequest(target)), head);
 		} catch (error) {

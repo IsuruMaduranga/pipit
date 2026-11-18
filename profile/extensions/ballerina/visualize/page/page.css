@@ -55,3 +55,5 @@ button { font: inherit; color: inherit; }
 
 /* View only: every node menu in both diagrams is an icon vscode-button; the zoom controls are not. */
 .view-only vscode-button[appearance="icon"] { display: none !important; }
+/* The agent node draws its "Add Memory" button even when read only. */
+.view-only [title="Add Memory"] { display: none !important; }

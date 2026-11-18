@@ -14,6 +14,7 @@
  */
 
 import { isAbsolute, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export interface Position {
 	line: number;
@@ -33,6 +34,7 @@ export type Route =
 	| { kind: "design"; pkg: ViewPackage }
 	| { kind: "artifacts"; pkg: ViewPackage }
 	| { kind: "flow"; pkg: ViewPackage; file: string; start: Position; end: Position }
+	| { kind: "components"; pkg: ViewPackage }
 	| { kind: "events" }
 	| { kind: "error"; status: number; message: string };
 
@@ -101,6 +103,13 @@ function flowRoute(query: URLSearchParams, context: RouteContext): Route {
 	return { kind: "flow", pkg, file: real, start: { line: startLine, offset: startOffset }, end: { line: endLine, offset: endOffset } };
 }
 
+/** The model routes that take only a package. */
+const PACKAGE_MODELS = new Map<string, "design" | "artifacts" | "components">([
+	["api/design", "design"],
+	["api/artifacts", "artifacts"],
+	["api/components", "components"],
+]);
+
 /** How to answer a request. */
 export function route(method: string | undefined, rawUrl: string | undefined, host: string | undefined, context: RouteContext): Route {
 	if (!allowedHost(host, context.port)) return fail(403, "Open the view through the address the command printed.");
@@ -118,10 +127,11 @@ export function route(method: string | undefined, rawUrl: string | undefined, ho
 	if (path === "" || path === "index.html") return { kind: "asset", name: "index.html" };
 	if (path === "events") return { kind: "events" };
 	if (path === "api/project") return { kind: "project" };
-	if (path === "api/design" || path === "api/artifacts") {
+	const packageModel = PACKAGE_MODELS.get(path);
+	if (packageModel) {
 		const pkg = pickPackage(url.searchParams, context.packages);
 		if ("kind" in pkg) return pkg;
-		return path === "api/design" ? { kind: "design", pkg } : { kind: "artifacts", pkg };
+		return { kind: packageModel, pkg };
 	}
 	if (path === "api/flow") return flowRoute(url.searchParams, context);
 	if (context.assets.has(path)) return { kind: "asset", name: path };
@@ -142,8 +152,11 @@ export interface ModelRequest {
  */
 export const MODEL_TIMEOUT_MS = 180_000;
 
+/** A route answered by a language-server request. */
+export type ModelRoute = Extract<Route, { kind: "design" | "artifacts" | "components" | "flow" }>;
+
 /** The language-server request behind a model route. */
-export function modelRequest(target: Extract<Route, { kind: "design" | "artifacts" | "flow" }>): ModelRequest {
+export function modelRequest(target: ModelRoute): ModelRequest {
 	const routeFile = resolve(target.pkg.dir, "Ballerina.toml");
 	switch (target.kind) {
 		case "design":
@@ -155,6 +168,15 @@ export function modelRequest(target: Extract<Route, { kind: "design" | "artifact
 				routeFile,
 				method: "flowDesignService/getFlowModel",
 				params: { filePath: target.file, startLine: target.start, endLine: target.end, forceAssign: true },
+				timeoutMs: MODEL_TIMEOUT_MS,
+			};
+		case "components":
+			// Every function with its file and range, agent tools included, which the artifacts leave out:
+			// how the designer finds an agent's tool in any file.
+			return {
+				routeFile,
+				method: "ballerinaPackage/components",
+				params: { documentIdentifiers: [{ uri: pathToFileURL(target.pkg.dir).href }] },
 				timeoutMs: MODEL_TIMEOUT_MS,
 			};
 	}
