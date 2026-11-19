@@ -94,7 +94,7 @@ export const subagentsText = (live: LiveTools): SubagentsText => {
         ),
         toMain: {
             description:
-                'Send progress, a finding, or a question to the main conversation while you work (to: "main"). The main conversation sees none of your plain text output until you finish, so use this for anything it should hear sooner.',
+                'Send progress, a finding, or a question to the main conversation while you work (to: "main"). The main conversation sees none of your plain text output until you finish, so use this for anything it should hear sooner. An answer comes back to you as a message, at your next tool call while you keep working. When you cannot continue without it, ask, then end your turn by saying what you are waiting for: the answer starts your next turn, and everything you did so far is kept.',
             params: {
                 to: 'The recipient: only "main" works from inside a subagent',
                 message: "The message for the main conversation, as plain text",
