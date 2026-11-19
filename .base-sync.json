@@ -1,7 +1,7 @@
 {
 	"source": "/Users/isuruWij/ml/pincer-agent",
-	"ref": "feature/agent-wait",
-	"commit": "bdd88dd505a537ff7586096233f540bc5cf69e28",
+	"ref": "48805a61",
+	"commit": "48805a615915a313396abeadb48c7838eeb1aadb",
 	"own": [
 		"working-docs/",
 		".claude/"

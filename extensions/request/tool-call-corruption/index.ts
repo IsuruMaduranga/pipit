@@ -27,11 +27,11 @@ import { OPENROUTER_HOST_CHANNEL, type OpenRouterHostEvent } from "../../lib/req
 import { activeOpenRouterRouting, routingFloorFailureHint } from "../../lib/request/openrouter-routing-defaults.ts";
 import { toolCallCorruptionText } from "./text.ts";
 
-// Silence allowed inside a stream. Every raw chunk restarts the clock, but
-// OpenRouter's keepalive comments never reach us, so a model thinking
-// server-side before its first token looks silent: that wait is long. After
-// the first content it is Claude Code's 90 s watchdog, and 60 s while a tool
-// call's arguments stream (arguments never pause for thinking).
+// Silence allowed inside an OpenRouter stream. Every raw chunk restarts the
+// clock, but OpenRouter's keepalive comments never reach us, so a model
+// thinking server-side before its first token looks silent: that wait is long.
+// After the first content it is 90 s, and 60 s while a tool call's arguments
+// stream (arguments never pause for thinking).
 const FIRST_CONTENT_IDLE_MS = 300_000;
 const STREAM_IDLE_MS = 90_000;
 const TOOL_CALL_IDLE_MS = 60_000;
@@ -187,8 +187,8 @@ export function toolCallCorruptionGuard(pi: ExtensionAPI, { announce }: { announ
 		const limit = repeatLimit(tool);
 		const repeat = trailingRepeat(repeats.get(update.contentIndex), update.delta, limit);
 		repeats.set(update.contentIndex, repeat.state);
-		if (!repeat.runaway) return;
-		stopRunaway(ctx, toolCallCorruptionText.runawayRepeat({ tool: tool ?? "tool", unit: repeat.runaway.unit, chars: repeat.runaway.length }));
+		if (repeat.unit === undefined) return;
+		stopRunaway(ctx, toolCallCorruptionText.runawayRepeat({ tool: tool ?? "tool", unit: repeat.unit, chars: limit }));
 	});
 
 	pi.on("message_update", (event, ctx) => {

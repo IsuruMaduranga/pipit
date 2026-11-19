@@ -68,14 +68,7 @@ export function waitForBackground(probes: YieldProbes, signal: AbortSignal | und
 			check();
 		});
 		signal?.addEventListener("abort", check, { once: true });
-		const first = yieldEnd(probes, false, signal?.aborted === true, 0, capMs);
-		if (first) {
-			clearInterval(timer);
-			unsubscribe();
-			signal?.removeEventListener("abort", check);
-			resolve(first);
-			return;
-		}
 		timer = setInterval(check, POLL_MS);
+		check();
 	});
 }

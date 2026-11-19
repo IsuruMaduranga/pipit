@@ -19,7 +19,7 @@
  */
 
 import { feature } from "../../lib/profile/feature.ts";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { whenAborted } from "../../lib/core/abort.ts";
 import { deferBaseTool } from "../../lib/request/deferred.ts";
@@ -27,7 +27,7 @@ import { persistedFilePreview, persistIfLarge, sessionResultsDir } from "../../l
 import { KILL_GRACE_MS, waitForChildExit } from "../../lib/shell-run/process-tree.ts";
 import { sessionAlive } from "../../lib/notify/session-lifecycle.ts";
 import { bashSpawn } from "../../lib/shell-run/shell-spawn.ts";
-import { ClickToggles, clickToExpand, toolRenderers, customMessageText, expandHintFor, formatDuration, formatFireTime, liveUiCtx, notificationComponent, scheduledTaskComponent } from "../../lib/ui/tui-render.ts";
+import { ClickToggles, clickToExpand, hiddenToolRenderers, toolRenderers, customMessageText, expandHintFor, formatDuration, formatFireTime, liveUiCtx, notificationComponent, scheduledTaskComponent } from "../../lib/ui/tui-render.ts";
 import {
 	type BackgroundTask,
 	BackgroundRegistry,
@@ -93,7 +93,11 @@ import { registerLocalCommand } from "../../lib/ui/local-command.ts";
 import { applyNoopFolds, decideFold, type FoldDetails, type FoldEntry, foldSuffix } from "./noop-fold.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { AGENT_CRON_CHANNEL, AGENT_CRON_FIRE_CHANNEL, type AgentCronFire, type AgentCronRequest, type FireConversation } from "../../lib/agents/agent-cron.ts";
-import { requireText } from "../../lib/profile/profile.ts";
+import { requireText, toolLive } from "../../lib/profile/profile.ts";
+import { textForModel } from "../../lib/agents/child-extensions.ts";
+import { followDescriptionForm, registerVariantTool } from "../../lib/profile/tool-variants.ts";
+import { toolsWithheldFrom, withOfferedTools } from "../../lib/models/model-family.ts";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { SKILL_BODY_CHANNEL, type SkillBodyQuery, SLASH_EXPAND_CHANNEL, type SlashExpandQuery } from "../../lib/plugins/skill-body.ts";
 import { BUNDLED_SKILLS_DIR } from "../../lib/plugins/skill-scan.ts";
 import { createWriteStream, mkdirSync, type WriteStream } from "node:fs";
@@ -421,7 +425,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 		cronTimer.unref?.();
 	};
 
-	pi.registerTool({
+	const monitorTool = defineTool({
 		name: "monitor",
 		label: "Monitor",
 		...toolRenderers("Monitor"),
@@ -722,6 +726,8 @@ function backgroundExtension(pi: ExtensionAPI) {
 			};
 		},
 	});
+	// Registered again when the session's model changes whether it is offered yield (followDescriptionForm below).
+	const setMonitorDescription = registerVariantTool<string>(pi, monitorTool.description, (description) => ({ ...monitorTool, description }));
 
 	pi.registerTool({
 		name: "task_output",
@@ -785,25 +791,45 @@ function backgroundExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// yield is active only for a model it is offered to; the monitor description names it only then.
+	const followModel = (model: Model<Api> | undefined) => {
+		const active = pi.getActiveTools();
+		const next = withOfferedTools(active, ["yield"], toolsWithheldFrom(model), toolLive);
+		if (next !== active) pi.setActiveTools([...next]);
+	};
+	pi.on("session_start", (_event, ctx) => followModel(ctx.model));
+	pi.on("model_select", (event) => followModel(event.model));
+	// pi restores the selected branch's tool loadout at a /tree switch.
+	pi.on("session_tree", (_event, ctx) => followModel(ctx.model));
+	followDescriptionForm(pi, (_form, _tier, withheld) => setMonitorDescription(textForModel("background", withheld).monitor.description));
+
+	// A session ending mid-wait ends the wait too, so nothing polls a dead session.
+	let sessionEnded = new AbortController();
+	pi.on("session_shutdown", () => sessionEnded.abort());
+	pi.on("session_start", () => {
+		if (sessionEnded.signal.aborted) sessionEnded = new AbortController();
+	});
+
 	// One wait per reply, as in Claude Code: a second yield in the same reply returns at once.
 	let yieldedInReply = false;
 	pi.on("message_start", (event) => {
 		if ((event.message as { role?: string }).role === "assistant") yieldedInReply = false;
 	});
 
-	// Claude Code 2.1.327's flagged `Yield`, on every model (findings §94): one
-	// blocking call for a model that wants to wait for an agent, a shell or a
-	// monitor, instead of polling. It ends when a notification is handed to pi
+	// Claude Code 2.1.327's flagged `Yield` (findings §94), offered to every
+	// model outside the Claude family (lib/models/model-family.ts toolsWithheldFrom):
+	// one blocking call for a model that wants to wait for an agent, a shell or
+	// a monitor, instead of polling. It ends when a notification is handed to pi
 	// (delivered right after this result), the user queues a message, a
 	// scheduled prompt is due, nothing is left that could report, the call is
 	// aborted, or the cap passes; the reason rides the result as a reminder.
+	// The TUI draws no row for it: the spinner and the agent rows already show
+	// the wait, and the notification follows it.
+	const yieldLabel = "Wait for background work";
 	pi.registerTool({
 		name: "yield",
-		label: "Wait for background work",
-		...toolRenderers("Wait for background work", {
-			title: () => "",
-			result: (result) => (result.details as { resumed?: string } | undefined)?.resumed,
-		}),
+		label: yieldLabel,
+		...hiddenToolRenderers(yieldLabel),
 		description: text.yield.description,
 		parameters: Type.Object({}),
 		// After an Agent or bash call in the same reply, so the work it waits for is registered.
@@ -824,20 +850,27 @@ function backgroundExtension(pi: ExtensionAPI) {
 							pi.events.emit(NOTIFIER_BACKLOG_CHANNEL, query);
 							return query;
 						},
-						running: () => registry.running().length,
+						// Every extension's running work: registry tasks, workflow runs, and
+						// residents busy on a later turn (lib/notify/session-work.ts).
+						running: () => {
+							const work: SessionWorkQuery = { crons: [], tasks: [] };
+							pi.events.emit(SESSION_WORK_CHANNEL, work);
+							return work.tasks.length;
+						},
 						userMessageQueued: () => ctx.hasPendingMessages(),
+						// Only a main-session job starts a turn here; a subagent's job fires into the agent.
 						scheduledDue: () => {
-							const next = cron.nextFireAt();
-							return next !== undefined && next <= Date.now();
+							const now = Date.now();
+							return cron.list().some((job) => job.agentId === undefined && job.nextFireAt <= now);
 						},
 						onHanded: (listener) => pi.events.on(NOTIFICATION_HANDED_CHANNEL, listener),
 					},
-					signal,
+					signal ? AbortSignal.any([signal, sessionEnded.signal]) : sessionEnded.signal,
 				);
 			}
 			const resumed = text.yield.resumed({ waitedMs: Date.now() - startedAt, end });
 			pi.events.emit(REMINDER_CHANNEL, { text: resumed, toolCallId } satisfies ReminderPayload);
-			return { content: [{ type: "text", text: text.yield.ended }], details: { end: end.kind, resumed } };
+			return { content: [{ type: "text", text: text.yield.ended }], details: { end: end.kind } };
 		},
 	});
 
