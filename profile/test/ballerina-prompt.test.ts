@@ -348,11 +348,15 @@ describe("the # Ballerina section", () => {
 		expect(text).toContain("Never read a readme to get your bearings");
 	});
 
-	it("sends learning a library to the librarian by a count of lookups", () => {
+	it("sends every library new to the session to the librarian, and keeps own lookups for single symbols", () => {
 		const text = render() ?? "";
-		expect(text).toContain("when one or two commands answer the question");
-		expect(text).toContain("likely to take three or more lookups");
-		expect(text).toContain("its report costs your context far less than the raw answers would");
+		expect(text).toContain("Learn a library through the `librarian` agent: before you write code against a library or connector that is new in this session, start one with the `Agent` tool");
+		expect(text).toContain("Run a lookup yourself only for one symbol you can already name, or when one or two commands you can name now answer the question.");
+		expect(text).toContain("A library new to this session is the librarian's (below); your own lookups are for single symbols.");
+		expect(text).not.toContain("Two targeted lookups before you write against a new connector");
+		expect(render(without("Agent"))).toContain("Two targeted lookups before you write against a new connector are well spent; ten are not.");
+		expect(render(without("Agent"))).not.toContain("librarian");
+		expect(text).toContain("Its report costs your context far less than the raw answers would");
 		expect(text).toContain("Write one brief per independent external system and start them in the same message");
 		expect(text).toContain("No more than three librarians run at a time");
 		expect(text).toContain("With more than three briefs, start three, and start each of the others when an earlier librarian reports.");
