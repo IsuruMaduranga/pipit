@@ -74,7 +74,11 @@ describe("the tier notice's logic", () => {
 });
 
 describe("the tier notice's wiring", () => {
-	beforeEach(() => pinCatalog(CATALOG));
+	beforeEach(() => {
+		pinCatalog(CATALOG);
+		// No `bal` on PATH: the setup check (its own tests cover it) stays out of these notices.
+		vi.stubEnv("PATH", "");
+	});
 	afterEach(() => {
 		vi.unstubAllEnvs();
 		vi.restoreAllMocks();

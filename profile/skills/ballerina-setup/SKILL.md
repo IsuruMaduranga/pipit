@@ -1,11 +1,11 @@
 ---
 name: ballerina-setup
-description: Use this skill when Ballerina is missing or out of date on the machine, that is when the `bal` command is not found, the distribution is older than the product supports, or a `bal` tool such as `discover` or `openapi` is not installed. It installs or updates only after the user agrees.
+description: Use this skill when Ballerina is missing or out of date on the machine, that is when the `bal` command is not found, the distribution is older than the product supports, or a `bal` tool such as `discover` or `openapi` is not installed. It installs or updates Ballerina only after the user agrees, and then the `discover` tool without asking.
 ---
 
 # Ballerina setup
 
-Install or update Ballerina and the `bal` tools this product uses. Everything here changes the user's machine, so the user decides. Follow the steps in order.
+Install or update Ballerina and the `bal` tools this product uses. Installing or updating Ballerina changes the user's machine, so the user decides; the `discover` tool is the one exception (Step 5). Follow the steps in order.
 
 ## Step 1: see what is there
 
@@ -48,21 +48,32 @@ Use the route the user chose. `<VERSION>` is the latest release shown on https:/
 
 A terminal that was open before the install does not see the new `PATH`. If `bal version` still fails afterwards, call `bal` by its full path for the rest of this session, and tell the user to restart the terminal.
 
-## Step 4: update an old distribution
+## When Ballerina is installed but finds no Java
 
-When `bal` is installed but the distribution is older than the product supports:
+Every `bal` command then fails with `Error: JAVA_HOME is not defined correctly.` An installer (the package, DEB, RPM or MSI) ships its own Java runtime in the `dependencies` folder next to `bin`, and the distribution uses it; this error means that runtime is gone, or a ZIP install has no `JAVA_HOME`.
 
-1. `bal update` updates the update tool itself. Run it first.
-2. `bal dist update` moves to the latest patch of the active distribution. `bal dist pull latest` moves to the latest release and makes it active. `bal dist list` shows what is installed and what is available.
+- An installer's install: list its `dependencies` folder (`ls /Library/Ballerina/dependencies` on macOS). If the runtime is missing, the fix is to install the same distribution again (Step 3), which restores it.
+- A ZIP install: set `JAVA_HOME` to a Java runtime of the version the distribution needs, in the user's shell profile, then open a new terminal.
 
-Ask before running them, as in step 2. An update can change how the user's other Ballerina projects build, so say that. A Homebrew install is updated with `brew upgrade bal` instead.
+Ask before reinstalling, as in Step 2.
+
+## Step 4: update the distribution
+
+The product offers newer distributions to the user itself, in its own dialog, and installs the one they pick. Follow this step when the user asks you to update.
+
+1. `bal dist list` shows what is installed and what is available, by release line (`2201.14` is one line, `2201.15` the next).
+2. Settle the version with the user before running anything. A patch of the active line (`2201.14.0` to `2201.14.2`) changes little. A new release (`2201.14` to `2201.15`) can change how the user's projects build, and it applies to every Ballerina project on the machine. When the user has not named a version, or "update" could mean either, ask which one, and say that.
+3. `bal update` updates the update tool itself. Run it first.
+4. `bal dist pull <version>` installs that version and makes it active.
+
+Run them only after the user's yes. A Homebrew install is updated with `brew upgrade bal` instead.
 
 ## Step 5: install the tools
 
-- `bal tool pull discover`: library lookup (`bal discover`).
-- `bal tool pull openapi`: only when the `connector` skill needs it.
+- `bal tool pull discover`: right after you install Ballerina, without asking. This product looks libraries up only with `bal discover`, so it is part of the setup, not an option. When Ballerina was already there, the session installs `discover` by itself in the background; you do not.
+- `bal tool pull openapi`: only when the `connector` skill needs it, and only after the user agrees.
 
-These download from Ballerina Central into the user's home folder (`~/.ballerina`). Ask first, in the same question as the install when both are needed.
+These download from Ballerina Central into the user's home folder (`~/.ballerina`).
 
 ## Step 6: verify
 

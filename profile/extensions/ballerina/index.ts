@@ -12,6 +12,9 @@
  * only under a profile that runs this folder (`Profile.extensions`).
  */
 
+import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -22,6 +25,7 @@ import {
 	openInBrowser,
 	productSetting,
 	productExtension,
+	productStateDir,
 	queueNotice,
 	REMINDER_CHANNEL,
 	type ReminderPayload,
@@ -31,8 +35,11 @@ import {
 } from "../../../extensions/sdk/extension.ts";
 import brand from "../../brand.json" with { type: "json" };
 import { BALLERINA_SERVER, BI_JAR, jarPath, LAUNCHER_PATH, launcherArgs, parseLauncherCheck } from "../../ballerina/language-server.ts";
-import { probeBallerina, setupNotice } from "./environment.ts";
+import { type CommandResult, type Machine, probeBallerina, probeFiles, TOOL_REGISTRY } from "./environment.ts";
 import { ensureJar } from "./jar-download.ts";
+import { STATE_FILE } from "./updates.ts";
+import { LOCK_FILE, releaseLock, takeLock } from "./install-lock.ts";
+import { createSessionSetup, type SessionSetup } from "./setup-session.ts";
 import { ballerinaSection } from "./prompt.ts";
 import { registerBallerinaSession } from "./session.ts";
 import { createReasoningNotices } from "./reasoning-notice.ts";
@@ -42,10 +49,12 @@ import { createTierNotices } from "./tier-notice.ts";
 import { type CommandUi, Visualizer } from "./visualize/visualize.ts";
 
 export const BALLERINA_SECTION_ID = "ballerina";
-export const SETUP_REMINDER_KEY = "ballerina-setup";
+export { SETUP_REMINDER_KEY, TOOLS_REMINDER_KEY } from "./setup-session.ts";
 export const VISUALIZE_COMMAND = "visualize";
 /** `bal` starts a JVM: slow on a cold machine, and never worth holding a session for. */
 const PROBE_TIMEOUT_MS = 30_000;
+/** One request to Ballerina Central's API for the newest versions. */
+const VERSION_CHECK_TIMEOUT_MS = 10_000;
 const BUNDLE_DIR = fileURLToPath(new URL("./visualize/bundle", import.meta.url));
 const STATUS_KEY = "visualize";
 
@@ -96,17 +105,53 @@ export default productExtension("ballerina", function ballerina(pi: ExtensionAPI
 		if (text) queueNotice(pi.events, ctx, "warning", text);
 	});
 
-	// The check runs beside the session, never in its way: the session starts
-	// at once, and the notice joins the next request after the answer is in.
-	// With Ballerina in place it says nothing, so the usual session pays nothing.
+	// The check never holds the session up. Reading Ballerina's files takes a
+	// few milliseconds, so its notice joins the first request; only when the
+	// files cannot tell does it ask `bal` itself, beside the session, and the
+	// notice joins the next request after the answer is in. With Ballerina in
+	// place it says nothing.
 	let live = false;
 	let visualizer: Visualizer | undefined;
-	pi.on("session_start", () => {
+	let setup: SessionSetup | undefined;
+	pi.on("before_agent_start", () => setup?.promptStarted());
+	pi.on("agent_end", () => setup?.turnEnded());
+	pi.on("session_start", (_event, ctx) => {
 		live = true;
-		void probeBallerina((command, args) => pi.exec(command, args, { timeout: PROBE_TIMEOUT_MS })).then((status) => {
-			const text = setupNotice(status);
-			if (live && text) pi.events.emit(REMINDER_CHANNEL, { key: SETUP_REMINDER_KEY, text, placement: "last-append" } satisfies ReminderPayload);
+		const stateFile = join(productStateDir(), STATE_FILE);
+		const registry = join(homedir(), TOOL_REGISTRY);
+		const lockFile = join(productStateDir(), LOCK_FILE);
+		setup = createSessionSetup({
+			// Through a promise: pi.exec throws at once on a session that /new, /resume or /reload replaced.
+			bal: (args, timeout) => Promise.resolve().then(() => pi.exec("bal", args, { timeout })).catch(failedToStart),
+			fetchJson: (url) =>
+				fetch(url, { signal: AbortSignal.timeout(VERSION_CHECK_TIMEOUT_MS), headers: { accept: "application/json" } })
+					.then((response) => (response.ok ? (response.json() as Promise<unknown>) : undefined))
+					.catch(() => undefined),
+			now: Date.now,
+			interactive: ctx.hasUI && (ctx.mode === "tui" || ctx.mode === "rpc"),
+			readRegistry: () => readText(registry),
+			readState: () => readText(stateFile),
+			writeState: (text) => {
+				try {
+					mkdirSync(productStateDir(), { recursive: true });
+					writeFileSync(stateFile, text);
+				} catch {}
+			},
+			lock: () => takeLock(lockFile),
+			unlock: () => releaseLock(lockFile),
+			live: () => live,
+			remind: (key, text) => {
+				if (live) pi.events.emit(REMINDER_CHANNEL, { key, text, placement: "last-append" } satisfies ReminderPayload);
+			},
+			notify: (level, text) => {
+				if (live) queueNotice(pi.events, ctx, level, text);
+			},
+			choose: (title, options) => ctx.ui.select(title, options),
 		});
+		const { act } = setup;
+		const fromFiles = probeFiles(thisMachine());
+		if (fromFiles) act(fromFiles);
+		else void probeBallerina((command, args) => pi.exec(command, args, { timeout: PROBE_TIMEOUT_MS })).then(act);
 	});
 	pi.on("session_shutdown", async () => {
 		live = false;
@@ -143,3 +188,42 @@ export default productExtension("ballerina", function ballerina(pi: ExtensionAPI
 		},
 	});
 });
+
+/** This process's machine, as the setup check's file probe reads it. */
+function thisMachine(): Machine {
+	const stat = (path: string) => {
+		try {
+			return statSync(path);
+		} catch {
+			return undefined;
+		}
+	};
+	return {
+		platform: process.platform,
+		path: process.env.PATH,
+		home: homedir(),
+		javaHome: process.env.JAVA_HOME,
+		isFile: (path) => stat(path)?.isFile() === true,
+		isDir: (path) => stat(path)?.isDirectory() === true,
+		read: readText,
+		realpath: (path) => {
+			try {
+				return realpathSync(path);
+			} catch {
+				return undefined;
+			}
+		},
+	};
+}
+
+/** A command that could not be started, as a failed result. */
+const failedToStart = (error: unknown): CommandResult => ({ stdout: "", stderr: error instanceof Error ? error.message : String(error), code: -1 });
+
+/** A file's text, or undefined when it cannot be read. */
+function readText(path: string): string | undefined {
+	try {
+		return readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
+}
