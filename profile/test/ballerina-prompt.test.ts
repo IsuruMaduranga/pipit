@@ -272,6 +272,7 @@ describe("the # Ballerina section", () => {
 			"## Project layout",
 			"## Creating a project or an integration",
 			"## Keeping code editable in the BI designer",
+			"## The diagram view (`/visualize`)",
 			"## Scope and questions",
 			"## When to look a library up",
 			"## Using bal discover",
@@ -346,6 +347,17 @@ describe("the # Ballerina section", () => {
 		expect(text).toContain("only for a package you do not know at all");
 		expect(text).toContain("Stop as soon as you can write the code");
 		expect(text).toContain("Never read a readme to get your bearings");
+	});
+
+	it("explains /visualize: the user's command, what it draws, and how to answer about it", () => {
+		const text = render() ?? "";
+		expect(text).toContain("## The diagram view (`/visualize`)\n\n`/visualize` is a command of this app that the user types at the prompt. You cannot run it, and nothing it shows reaches this conversation.");
+		expect(text).toContain("- each agent with its tools, each tool opening as a flow of its own.");
+		expect(text).toContain("It redraws itself when the code changes");
+		expect(text).toContain("It works on macOS and Linux, not on Windows");
+		expect(text).toContain("tell them to run `/visualize` instead of drawing a diagram in text");
+		expect(text).toContain("the cause is in the code: check it against the designer rules above and fix it.");
+		expect(text).toContain("its message appears in the user's terminal, not here");
 	});
 
 	it("sends every library new to the session to the librarian, and keeps own lookups for single symbols", () => {

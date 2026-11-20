@@ -12,7 +12,7 @@ import { lowBundle } from "./low.ts";
 import { memoryPromptSection } from "./memory.ts";
 import { midBundle } from "./mid.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
-import { TYPED_SKILL_BULLET } from "./common.ts";
+import { PLAN_APPROVAL_BULLET, TYPED_SKILL_BULLET, USER_COMMUNICATION } from "./common.ts";
 import { DELEGATE_STRICT } from "./low.ts";
 import { DELEGATING_WORK, FORK_BULLET } from "./mid.ts";
 
@@ -50,6 +50,9 @@ const PROMPT_PASSAGES: ToolPassages = {
     grep: SHELL_SEARCH,
     find: SHELL_SEARCH,
     ls: SHELL_SEARCH,
+    // Before exit_plan_mode: the whole section is matched with its plan bullet still in it.
+    ask_user_question: [USER_COMMUNICATION],
+    exit_plan_mode: [PLAN_APPROVAL_BULLET],
     edit: [["(read, edit, write)", "(read, write)"], ["call the edit or write tool", "call the write tool"], [" edit for changing them (not sed or awk),", ""], ["the edit/write tools", "the write tool"]],
 };
 

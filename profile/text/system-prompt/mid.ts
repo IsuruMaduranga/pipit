@@ -16,6 +16,7 @@ import {
     SECURITY,
     TYPED_SKILL_BULLET,
     URL_BAN,
+    USER_COMMUNICATION,
 } from "./common.ts";
 
 /** The long register's line after the identity line, as in frontier.ts. */
@@ -105,6 +106,7 @@ const midLead = (usingToolsSection: string) => [
     DELEGATING_WORK,
     TONE_STYLE,
     TEXT_OUTPUT,
+    USER_COMMUNICATION,
     SESSION_GUIDANCE_LONG,
 ];
 

@@ -10,7 +10,7 @@
  * the long memory spec.
  */
 
-import { CONTEXT_MANAGEMENT, type PromptBundle } from "./common.ts";
+import { CONTEXT_MANAGEMENT, type PromptBundle, USER_COMMUNICATION } from "./common.ts";
 import {
     DOING_TASKS,
     EXECUTING_CARE,
@@ -92,6 +92,7 @@ const lowLead = (taskTools: boolean, shellTool = shellToolPhrase(undefined)) => 
     DELEGATE_STRICT,
     TONE_STYLE,
     TEXT_OUTPUT,
+    USER_COMMUNICATION,
     SESSION_GUIDANCE_LONG,
 ];
 

@@ -14,6 +14,7 @@ import {
     type PromptBundle,
     SECURITY,
     TYPED_SKILL_BULLET,
+    USER_COMMUNICATION,
 } from "./common.ts";
 
 /** The line after the identity line, in the same first section. */
@@ -35,7 +36,7 @@ Confirm before acting when an action is hard to undo or leaves the local environ
 export const SESSION_GUIDANCE = `# In this session\n${BANG_COMMAND_BULLET}\n${TYPED_SKILL_BULLET}`;
 
 export const frontierBundle: PromptBundle = {
-    lead: [`${IDENTITY}\n${AGENT_INTRO}\n\n${DOMAIN}`, SECURITY, HARNESS, STYLE, SESSION_GUIDANCE],
+    lead: [`${IDENTITY}\n${AGENT_INTRO}\n\n${DOMAIN}`, SECURITY, HARNESS, STYLE, USER_COMMUNICATION, SESSION_GUIDANCE],
     tail: [CONTEXT_MANAGEMENT],
     verboseMemory: false,
 };
