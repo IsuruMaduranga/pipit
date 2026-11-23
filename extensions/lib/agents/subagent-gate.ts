@@ -38,6 +38,8 @@ export interface ChildToolCall {
 	 * screen and holds the prompt chain (SUBAGENT-REVIEW M5).
 	 */
 	signal?: AbortSignal;
+	/** The call's own id, set by the child's gate from the event (never from tool input): a grant for this one call is filed under it. */
+	toolCallId?: string;
 	/** The child session's id (what the gate can see); the runner maps it to `agent`. */
 	sessionId?: string;
 	/**
@@ -55,6 +57,13 @@ export interface ChildToolCall {
 	 * (safety/permissions/auto-mode/history.ts childHistoryCursor).
 	 */
 	parentToolCallId?: string;
+	/**
+	 * Where the child's own session persists oversized tool outputs, resolved,
+	 * set by the child's gate from its session (never from tool input). It is
+	 * not the parent's when the child runs in another directory (a worktree) or
+	 * has no session file, and the child is told to read those files back.
+	 */
+	resultsDirPath?: string;
 }
 
 /** A permission decision: `undefined` = allow; otherwise block with a model-facing reason. */

@@ -44,14 +44,14 @@ export type ReplayApi =
 /**
  * Where the output cap lives, first match in the captured body wins: a
  * top-level field, or one level down (Bedrock's `inferenceConfig.maxTokens`,
- * Google's `config.maxOutputTokens`). Codex sends none.
+ * Google's `config.maxOutputTokens`).
  */
 const CAP_PATHS: Record<ReplayApi, ReadonlyArray<readonly string[]>> = {
 	"anthropic-messages": [["max_tokens"]],
 	"openai-completions": [["max_completion_tokens"], ["max_tokens"]],
 	"openai-responses": [["max_output_tokens"]],
 	"azure-openai-responses": [["max_output_tokens"]],
-	"openai-codex-responses": [],
+	"openai-codex-responses": [["max_output_tokens"]],
 	"bedrock-converse-stream": [["inferenceConfig", "maxTokens"]],
 	"google-generative-ai": [["config", "maxOutputTokens"]],
 	"google-vertex": [["config", "maxOutputTokens"]],
@@ -75,10 +75,16 @@ function capAt(payload: Record<string, unknown>, path: readonly string[]): numbe
 	return typeof value === "number" ? value : undefined;
 }
 
-/** The path of the cap `payload` carries for `api`, or the first one the API takes. */
-function capPath(api: ReplayApi, payload: Record<string, unknown>): readonly string[] | undefined {
-	const paths = CAP_PATHS[api];
-	return paths.find((path) => capAt(payload, path) !== undefined) ?? paths[0];
+/**
+ * Where a side call's cap goes: the path of the cap in `tail`, the body pi
+ * built for this call with its `maxTokens`, or none when pi wrote none there.
+ * pi leaves the cap off where the endpoint rejects it (Sign in with ChatGPT on
+ * `openai`, a Responses model whose compat takes no `max_output_tokens`, Codex
+ * before pi 1.6.0), so a replay writes one exactly where pi does, read from
+ * the bytes rather than from the login or pi's version.
+ */
+function capPath(api: ReplayApi, tail: Record<string, unknown>): readonly string[] | undefined {
+	return CAP_PATHS[api].find((path) => capAt(tail, path) !== undefined);
 }
 
 /** `payload` with `value` at `path`, copying only the objects on the way. */
@@ -234,7 +240,7 @@ export class LastExchange<Reply extends MessageLike = MessageLike> {
 /**
  * The captured body with `tail`'s message list (a body pi-ai built for the tail
  * alone) appended, every other field kept byte for byte. `maxTokens` replaces
- * the output cap when given.
+ * the output cap when given, where pi wrote a cap into `tail` (`capPath`).
  *
  * Anthropic cache breakpoints: the tail's own markers are dropped, and when the
  * tail starts with the assistant reply, the markers on the captured request's
@@ -262,7 +268,7 @@ export function extendPayload(capture: RequestCapture, tail: Record<string, unkn
 		const own = isPlainObject(tail.config) ? tail.config.abortSignal : undefined;
 		out = { ...out, config: own === undefined ? config : { ...config, abortSignal: own } };
 	}
-	const path = maxTokens === undefined ? undefined : capPath(capture.api, capture.payload);
+	const path = maxTokens === undefined ? undefined : capPath(capture.api, tail);
 	return path && maxTokens !== undefined ? withCap(out, path, maxTokens) : out;
 }
 
@@ -360,7 +366,7 @@ export function forkRequestPayload(capture: RequestCapture, child: Record<string
 	const parentDeclared = captureDeclarations(capture);
 	// The child's own prelude and system messages go; a Responses load item its
 	// tool_search placed in the tail stays, less what the capture declares.
-	const tail = childList.slice(preludeLength(childList, capture.api)).flatMap((entry): WireMessage[] => {
+	const tail = childList.slice(preludeLength(childList, capture.api, child)).flatMap((entry): WireMessage[] => {
 		if (isToolsItem(entry)) {
 			const tools = entry.tools.filter((tool) => !parentDeclared.has(toolName(tool) ?? ""));
 			return tools.length > 0 ? [{ ...entry, tools } as WireMessage] : [];

@@ -78,9 +78,7 @@ import { panelUi } from "../../lib/ui/panel-focus.ts";
 import { requireText } from "../../lib/profile/profile.ts";
 import { failureOf } from "./failure.ts";
 import { mcpResultText, mcpResourcesResultText } from "./text.ts";
-
-/** Anthropic's hard limit on a tool name; a longer one fails the whole request. */
-const MAX_TOOL_NAME_LENGTH = 128;
+import { maxToolNameLength, namesOverLimit, WIDEST_TOOL_NAME_LENGTH } from "../../lib/request/tool-name-limit.ts";
 
 /** Shared "server name not found" tool result for the resource read/list-dir tools. */
 function unknownServerError(name: string) {
@@ -146,20 +144,28 @@ function mcpExtension(pi: ExtensionAPI) {
 	 */
 	const resultsDir = (ctx: ExtensionContext | undefined): string => sessionResultsDir(ctx);
 
+	/** The API of the session's model, for naming in /mcp the tools its provider refuses; unknown until a session starts. */
+	let modelApi: string | undefined;
+	pi.on("model_select", (event) => {
+		modelApi = (event as { model?: { api?: string } }).model?.api ?? modelApi;
+	});
+
 	const registerToolsFor = (connection: Connection) => {
 		// Names other extensions own, read once per batch (getAllTools builds every definition).
 		let taken: Set<string> | undefined;
 		for (const tool of connection.tools) {
 			const name = namespacedToolName(connection.server.name, tool.name);
-			// Anthropic caps a tool name at 128 characters and rejects the whole
-			// request when one is longer — and a deferred definition rides every
-			// request from request 1, so one over-long name would fail every turn
-			// of the session with an opaque `tools.N.custom.name` error. Drop it
-			// here with a clear reason instead.
-			if (name.length > MAX_TOOL_NAME_LENGTH) {
+			// No provider takes a name over the widest limit, and a deferred
+			// definition rides every request where the provider defers natively,
+			// so one such name would fail every turn: leave it out with a reason in
+			// /mcp. A name within it but over the current model's limit (64 on the
+			// OpenAI family) is registered: the model can change, and tool-search
+			// keeps it out of the active set while the model's provider refuses it
+			// (lib/request/tool-name-limit.ts).
+			if (name.length > WIDEST_TOOL_NAME_LENGTH) {
 				failures.push({
 					server: connection.server,
-					error: mcpResultText.failure({ kind: "nameTooLong", tool: tool.name, length: name.length, max: MAX_TOOL_NAME_LENGTH }),
+					error: mcpResultText.failure({ kind: "nameTooLong", tool: tool.name, length: name.length, max: WIDEST_TOOL_NAME_LENGTH }),
 				});
 				continue;
 			}
@@ -381,8 +387,12 @@ function mcpExtension(pi: ExtensionAPI) {
 		notices.forEach((text, i) => request.blocks.push({ text, ...(i === 0 ? { facts: delta.facts } : {}) }));
 	});
 
-	/** Config files that exist but failed to parse (review M11) — shown at startup and in /mcp. */
-	let configErrors: string[] = [];
+	/**
+	 * What the last config load warned about: files that failed to parse, and
+	 * entries it skipped or reads another way. Shown once at startup, and kept
+	 * for /mcp (its panel and its text forms), long after that notice is gone.
+	 */
+	let configNotes: string[] = [];
 
 	/** How the consent check asks, tells and records a "No", for startup and for Reconnect alike. */
 	const consentDeps = (ctx: ExtensionContext): McpTrustDeps => ({
@@ -402,20 +412,20 @@ function mcpExtension(pi: ExtensionAPI) {
 		const plugins = discoverPlugins(defaultDiscoverRoots(getAgentDir(), ctx.cwd));
 		pluginConfigPaths = new Set(plugins.mcpConfigs);
 		mcpFiles = new Map(mcpConfigFiles(ctx.cwd, home).map((file) => [file.path, { scope: file.scope, shown: relativeDisplayPath(ctx.cwd, file.path) }]));
-		configErrors = [];
-		const configNotes: string[] = [];
+		const configErrors: string[] = [];
+		const notes: string[] = [];
 		servers = loadServers(ctx.cwd, home, process.env, [...pluginConfigPaths], {
 			pluginNames: plugins.mcpConfigPlugins,
 			onError: (path, message) => configErrors.push(`${path}: ${message}`),
 			piConfigs: piMcpConfigs(ctx.cwd),
-			onNote: (message) => configNotes.push(message),
+			onNote: (message) => notes.push(message),
 			registered: registeredMcpServers(pi),
 		});
-		const configWarnings = [
+		configNotes = [
 			...(configErrors.length > 0 ? [`MCP config could not be parsed (ignored): ${configErrors.join("; ")}`] : []),
-			...configNotes,
+			...notes,
 		];
-		for (const text of configWarnings) {
+		for (const text of configNotes) {
 			if (ctx.hasUI) ctx.ui.notify(text, "warning");
 			else process.stderr.write(`${text}\n`);
 		}
@@ -598,6 +608,7 @@ function mcpExtension(pi: ExtensionAPI) {
 		// (lib/notify/session-lifecycle.ts): connect once. A second connect
 		// replaced each connection in `connections`, and the replaced one was
 		// never closed, so its server ran until the process exited.
+		modelApi = (ctx.model as { api?: string } | undefined)?.api ?? modelApi;
 		if (connecting) {
 			if (!ctx.hasUI) await connecting;
 			return;
@@ -641,6 +652,14 @@ function mcpExtension(pi: ExtensionAPI) {
 		connections.clear();
 	});
 
+	/** A note naming the first of a connection's tools the current model's provider refuses (tool-search keeps them inactive), or undefined. */
+	const overLimitNote = (connection: Connection): string | undefined => {
+		const byName = new Map(connection.tools.map((tool) => [namespacedToolName(connection.server.name, tool.name), tool.name]));
+		const [name] = namesOverLimit([...byName.keys()].filter((candidate) => registered.get(candidate)?.server === connection.server.name), modelApi);
+		if (name === undefined) return undefined;
+		return mcpResultText.failure({ kind: "nameOverModelLimit", tool: byName.get(name) ?? name, length: name.length, max: maxToolNameLength(modelApi) });
+	};
+
 	// Single source of truth for a server's status, shared by the /plugins status
 	// snapshot, the /mcp panel entries, and the text fallback.
 	const deriveStatus = (server: McpServer): { status: McpEntryStatus; detail?: string; toolCount?: number } => {
@@ -652,8 +671,8 @@ function mcpExtension(pi: ExtensionAPI) {
 			// A server can connect yet warn (e.g. listTools/listResources failed);
 			// adoptConnection files those under `failures`. Surface it so the warning
 			// isn't collected-but-invisible.
-			const warning = failures.find((f) => f.server.name === server.name);
-			return { status: "connected", toolCount: connection.tools.length, detail: warning?.error };
+			const warning = failures.find((f) => f.server.name === server.name)?.error ?? overLimitNote(connection);
+			return { status: "connected", toolCount: connection.tools.length, detail: warning };
 		}
 		if (oauthNeeded.has(server.name)) return { status: "authNeeded" };
 		if (server.missingEnv?.length) {
@@ -938,7 +957,7 @@ function mcpExtension(pi: ExtensionAPI) {
 					const termRows = (tui as { terminal: { rows: number } }).terminal.rows;
 					const height = boundedDockHeight(termRows, MCP_PANEL_MAX_HEIGHT);
 					const lines = renderMcpPanel(
-						{ state, entries, width, height, notices, settled: connectSettled, where: mcpConfigWhere(openSources(os.homedir()).mcpWhere) },
+						{ state, entries, width, height, notices, configNotes, settled: connectSettled, where: mcpConfigWhere(openSources(os.homedir()).mcpWhere) },
 						paint,
 					).map((line) => truncateLine(line, width));
 					cache = { width, lines };
@@ -968,7 +987,7 @@ function mcpExtension(pi: ExtensionAPI) {
 		description: "Manage MCP servers (status, reconnect, authenticate, enable/disable)",
 		handler: async (args, ctx) => {
 			if (servers.length === 0) {
-				const stdout = noMcpServersMessage(openSources(home).mcpWhere);
+				const stdout = [noMcpServersMessage(openSources(home).mcpWhere), ...configNotes].join("\n");
 				ctx.ui.notify(stdout, "info");
 				return stdout;
 			}
@@ -991,6 +1010,7 @@ function mcpExtension(pi: ExtensionAPI) {
 				}
 				return `${status.padEnd(12)} ${server.name}${suffix} (${server.source})`;
 			});
+			lines.push(...configNotes);
 			ctx.ui.notify(lines.join("\n"), "info");
 			return [readOnly, ...lines].filter(Boolean).join("\n");
 		},

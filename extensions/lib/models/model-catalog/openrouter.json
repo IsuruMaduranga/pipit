@@ -1,5 +1,5 @@
 {
-	"fetchedAt": "2026-11-15T11:45:37.821Z",
+	"fetchedAt": "2026-11-23T08:11:02.727Z",
 	"source": "https://openrouter.ai/api/v1/models",
 	"payload": {
 		"data": [
@@ -618,18 +618,6 @@
 				}
 			},
 			{
-				"id": "cohere/north-mini-code:free",
-				"created": 1781723748,
-				"hugging_face_id": "CohereLabs/North-Mini-Code-1.0",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0",
-					"completion": "0"
-				}
-			},
-			{
 				"id": "deepseek/deepseek-chat",
 				"created": 1735241320,
 				"hugging_face_id": "deepseek-ai/DeepSeek-V3",
@@ -649,8 +637,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000029",
-					"completion": "0.00000114"
+					"prompt": "0.00000025",
+					"completion": "0.000001"
 				}
 			},
 			{
@@ -673,8 +661,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000005",
-					"completion": "0.00000215"
+					"prompt": "0.000000571",
+					"completion": "0.000002286"
 				}
 			},
 			{
@@ -757,8 +745,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000044",
-					"completion": "0.00000132"
+					"prompt": "0.0000002156",
+					"completion": "0.0000006468"
 				}
 			},
 			{
@@ -781,8 +769,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000111",
-					"completion": "0.00000444"
+					"prompt": "0.00000132",
+					"completion": "0.00000396"
 				}
 			},
 			{
@@ -793,8 +781,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000000507",
-					"completion": "0.0000002028"
+					"prompt": "0.0000000498",
+					"completion": "0.0000001992"
 				}
 			},
 			{
@@ -805,8 +793,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000002",
-					"completion": "0.000000108"
+					"prompt": "0.0000003",
+					"completion": "0.0000012"
 				}
 			},
 			{
@@ -817,8 +805,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000023",
-					"completion": "0.0000002"
+					"prompt": "0.000000035",
+					"completion": "0.000000149"
 				}
 			},
 			{
@@ -829,8 +817,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000112",
-					"completion": "0.000000336"
+					"prompt": "0.00000005",
+					"completion": "0.00000015"
 				}
 			},
 			{
@@ -1263,6 +1251,28 @@
 				}
 			},
 			{
+				"id": "google/gemini-4-neon",
+				"created": 1795006977,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000003",
+					"completion": "0.000015"
+				}
+			},
+			{
+				"id": "google/gemini-4-neon:batch",
+				"created": 1795006977,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.0000015",
+					"completion": "0.0000075"
+				}
+			},
+			{
 				"id": "google/gemini-nano-banana-2.1",
 				"created": 1791300825,
 				"supported_parameters": [
@@ -1337,7 +1347,7 @@
 				],
 				"pricing": {
 					"prompt": "0.00000008",
-					"completion": "0.00000035"
+					"completion": "0.00000016"
 				}
 			},
 			{
@@ -1345,8 +1355,8 @@
 				"created": 1741905510,
 				"hugging_face_id": "google/gemma-3-4b-it",
 				"pricing": {
-					"prompt": "0.00000005",
-					"completion": "0.0000001"
+					"prompt": "0.00000004",
+					"completion": "0.00000005"
 				}
 			},
 			{
@@ -1357,8 +1367,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000000675",
-					"completion": "0.000000225"
+					"prompt": "0.00000009",
+					"completion": "0.0000003"
 				}
 			},
 			{
@@ -1430,8 +1440,8 @@
 				"created": 1688256000,
 				"hugging_face_id": "Gryphe/MythoMax-L2-13b",
 				"pricing": {
-					"prompt": "0.00000008",
-					"completion": "0.00000011"
+					"prompt": "0.0000003",
+					"completion": "0.0000005"
 				}
 			},
 			{
@@ -1443,7 +1453,7 @@
 				],
 				"pricing": {
 					"prompt": "0.00000006",
-					"completion": "0.00000025"
+					"completion": "0.00000015"
 				}
 			},
 			{
@@ -1490,8 +1500,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000045",
-					"completion": "0.000000135"
+					"prompt": "0.00000006",
+					"completion": "0.00000018"
 				}
 			},
 			{
@@ -1580,18 +1590,6 @@
 				}
 			},
 			{
-				"id": "meituan/longcat-2.0",
-				"created": 1784554658,
-				"hugging_face_id": "meituan-longcat/LongCat-2.0",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0.0000003",
-					"completion": "0.0000012"
-				}
-			},
-			{
 				"id": "meta-llama/llama-3.1-70b-instruct",
 				"created": 1721692800,
 				"hugging_face_id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
@@ -1616,21 +1614,12 @@
 				}
 			},
 			{
-				"id": "meta-llama/llama-3.2-1b-instruct",
-				"created": 1727222400,
-				"hugging_face_id": "meta-llama/Llama-3.2-1B-Instruct",
-				"pricing": {
-					"prompt": "0.000000027",
-					"completion": "0.000000201"
-				}
-			},
-			{
 				"id": "meta-llama/llama-3.2-3b-instruct",
 				"created": 1727222400,
 				"hugging_face_id": "meta-llama/Llama-3.2-3B-Instruct",
 				"pricing": {
-					"prompt": "0.0000000509",
-					"completion": "0.000000335"
+					"prompt": "0.00000005",
+					"completion": "0.00000033"
 				}
 			},
 			{
@@ -1697,8 +1686,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000003",
-					"completion": "0.0000012"
+					"prompt": "0.00000035",
+					"completion": "0.0000015"
 				}
 			},
 			{
@@ -1820,8 +1809,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000021",
-					"completion": "0.00000084"
+					"prompt": "0.0000006",
+					"completion": "0.0000018"
 				}
 			},
 			{
@@ -1973,8 +1962,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000004",
-					"completion": "0.000002"
+					"prompt": "0.00000044",
+					"completion": "0.0000022"
 				}
 			},
 			{
@@ -2008,8 +1997,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000004",
-					"completion": "0.000002"
+					"prompt": "0.00000044",
+					"completion": "0.0000022"
 				}
 			},
 			{
@@ -2076,8 +2065,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000001",
-					"completion": "0.0000003"
+					"prompt": "0.000000075",
+					"completion": "0.0000002"
 				}
 			},
 			{
@@ -2087,6 +2076,14 @@
 				"supported_parameters": [
 					"tools"
 				],
+				"pricing": {
+					"prompt": "0.000002",
+					"completion": "0.000006"
+				}
+			},
+			{
+				"id": "mistralai/pixtral-large-2502",
+				"created": 1795135865,
 				"pricing": {
 					"prompt": "0.000002",
 					"completion": "0.000006"
@@ -2191,7 +2188,7 @@
 				],
 				"pricing": {
 					"prompt": "0.0000006",
-					"completion": "0.0000035"
+					"completion": "0.000003"
 				}
 			},
 			{
@@ -2222,9 +2219,12 @@
 				"id": "moonshotai/kimi-k3.1-pro:batch",
 				"created": 1792778188,
 				"hugging_face_id": "moonshotai/Kimi-K3.1-Pro",
+				"supported_parameters": [
+					"tools"
+				],
 				"pricing": {
-					"prompt": "0.000000275",
-					"completion": "0.000004125"
+					"prompt": "0.000000372",
+					"completion": "0.000005583"
 				}
 			},
 			{
@@ -2369,8 +2369,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000006",
-					"completion": "0.0000024"
+					"prompt": "0.0000005",
+					"completion": "0.0000022"
 				}
 			},
 			{
@@ -2427,7 +2427,7 @@
 				],
 				"pricing": {
 					"prompt": "0.00000015",
-					"completion": "0.0000005"
+					"completion": "0.00000047"
 				}
 			},
 			{
@@ -3082,8 +3082,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000044",
-					"completion": "0.000022"
+					"prompt": "0.000004",
+					"completion": "0.00002"
 				}
 			},
 			{
@@ -3395,6 +3395,94 @@
 				}
 			},
 			{
+				"id": "openai/gpt-6.2-astra",
+				"created": 1794938423,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000008",
+					"completion": "0.00004"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-astra-pro",
+				"created": 1794938432,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000008",
+					"completion": "0.00004"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-astra-pro:batch",
+				"created": 1794938432,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000004",
+					"completion": "0.00002"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-astra:batch",
+				"created": 1794938423,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000004",
+					"completion": "0.00002"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-sol",
+				"created": 1794938371,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000002",
+					"completion": "0.00001"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-sol-pro",
+				"created": 1794938409,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000002",
+					"completion": "0.00001"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-sol-pro:batch",
+				"created": 1794938409,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000001",
+					"completion": "0.000005"
+				}
+			},
+			{
+				"id": "openai/gpt-6.2-sol:batch",
+				"created": 1794938371,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000001",
+					"completion": "0.000005"
+				}
+			},
+			{
 				"id": "openai/gpt-audio",
 				"created": 1768862569,
 				"supported_parameters": [
@@ -3447,8 +3535,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000015",
-					"completion": "0.0000006"
+					"prompt": "0.00000005",
+					"completion": "0.00000025"
 				}
 			},
 			{
@@ -3650,7 +3738,7 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000006",
+					"prompt": "0.00000007",
 					"completion": "0.0000005"
 				}
 			},
@@ -3881,8 +3969,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000015",
-					"completion": "0.0000006"
+					"prompt": "0.00000007",
+					"completion": "0.00000028"
 				}
 			},
 			{
@@ -3916,7 +4004,7 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000009",
+					"prompt": "0.0000001",
 					"completion": "0.0000011"
 				}
 			},
@@ -3942,18 +4030,6 @@
 				"pricing": {
 					"prompt": "0.00000015",
 					"completion": "0.0000006"
-				}
-			},
-			{
-				"id": "qwen/qwen3-vl-30b-a3b-thinking",
-				"created": 1759794479,
-				"hugging_face_id": "Qwen/Qwen3-VL-30B-A3B-Thinking",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0.00000029",
-					"completion": "0.000001"
 				}
 			},
 			{
@@ -4012,8 +4088,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000006",
-					"completion": "0.0000036"
+					"prompt": "0.00000045",
+					"completion": "0.000003"
 				}
 			},
 			{
@@ -4024,8 +4100,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000025",
-					"completion": "0.000000036"
+					"prompt": "0.00000017",
+					"completion": "0.00000025"
 				}
 			},
 			{
@@ -4081,8 +4157,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000001",
-					"completion": "0.0000009"
+					"prompt": "0.00000005",
+					"completion": "0.0000007"
 				}
 			},
 			{
@@ -4171,8 +4247,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000015",
-					"completion": "0.000001875"
+					"prompt": "0.000000035",
+					"completion": "0.0000015"
 				}
 			},
 			{
@@ -4244,6 +4320,29 @@
 				}
 			},
 			{
+				"id": "qwen/qwen4-max",
+				"created": 1794795526,
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000001425",
+					"completion": "0.000004275"
+				}
+			},
+			{
+				"id": "radixark/daisyrose-27b",
+				"created": 1795222188,
+				"hugging_face_id": "RadixArk/DaisyRose-27B",
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.00000015",
+					"completion": "0.000001875"
+				}
+			},
+			{
 				"id": "recursive/flint-v1.0:free",
 				"created": 1792622765,
 				"hugging_face_id": "RecursiveSI/flint",
@@ -4263,7 +4362,7 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000003",
+					"prompt": "0.00000025",
 					"completion": "0.000001"
 				}
 			},
@@ -4398,18 +4497,6 @@
 				}
 			},
 			{
-				"id": "stepfun/step-3.5-flash",
-				"created": 1769728337,
-				"hugging_face_id": "stepfun-ai/Step-3.5-Flash",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0.0000001",
-					"completion": "0.0000003"
-				}
-			},
-			{
 				"id": "stepfun/step-3.7-flash",
 				"created": 1779985069,
 				"hugging_face_id": "stepfun-ai/Step-3.7-Flash",
@@ -4431,15 +4518,6 @@
 				"pricing": {
 					"prompt": "0.000001",
 					"completion": "0.0000027"
-				}
-			},
-			{
-				"id": "tencent/hunyuan-a13b-instruct",
-				"created": 1751987664,
-				"hugging_face_id": "tencent/Hunyuan-A13B-Instruct",
-				"pricing": {
-					"prompt": "0.00000014",
-					"completion": "0.00000057"
 				}
 			},
 			{
@@ -4477,20 +4555,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000132",
-					"completion": "0.000000528"
-				}
-			},
-			{
-				"id": "tencent/hy3-preview",
-				"created": 1776878150,
-				"hugging_face_id": "tencent/Hy3-preview",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0.00000018",
-					"completion": "0.0000006"
+					"prompt": "0.00000014",
+					"completion": "0.00000058"
 				}
 			},
 			{
@@ -4503,6 +4569,18 @@
 				"pricing": {
 					"prompt": "0.000000417",
 					"completion": "0.0000012505"
+				}
+			},
+			{
+				"id": "tencent/hy4-flash",
+				"created": 1794838706,
+				"hugging_face_id": "tencent/Hy4-flash",
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000000035",
+					"completion": "0.0000001405"
 				}
 			},
 			{
@@ -4557,6 +4635,18 @@
 				}
 			},
 			{
+				"id": "thinkingmachines/inkling-2-mini",
+				"created": 1795227585,
+				"hugging_face_id": "thinkingmachines/Inkling-2-Mini",
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000000075",
+					"completion": "0.0000003"
+				}
+			},
+			{
 				"id": "thinkingmachines/inkling-2-small",
 				"created": 1794261847,
 				"hugging_face_id": "thinkingmachines/Inkling-2-Small",
@@ -4566,18 +4656,6 @@
 				"pricing": {
 					"prompt": "0.0000003",
 					"completion": "0.000001"
-				}
-			},
-			{
-				"id": "thinkingmachines/inkling-2-small:free",
-				"created": 1794261847,
-				"hugging_face_id": "thinkingmachines/Inkling-2-Small",
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0",
-					"completion": "0"
 				}
 			},
 			{
@@ -4784,17 +4862,6 @@
 				}
 			},
 			{
-				"id": "x-ai/grok-build-0.1",
-				"created": 1779298123,
-				"supported_parameters": [
-					"tools"
-				],
-				"pricing": {
-					"prompt": "0.000001",
-					"completion": "0.000002"
-				}
-			},
-			{
 				"id": "xiaomi/mimo-v2.5",
 				"created": 1776874269,
 				"hugging_face_id": "XiaomiMiMo/MiMo-V2.5",
@@ -4814,8 +4881,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000435",
-					"completion": "0.00000087"
+					"prompt": "0.00000048",
+					"completion": "0.0000018"
 				}
 			},
 			{
@@ -4873,8 +4940,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000002",
-					"completion": "0.0000011"
+					"prompt": "0.00000013",
+					"completion": "0.00000085"
 				}
 			},
 			{
@@ -4921,8 +4988,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000004",
-					"completion": "0.00000175"
+					"prompt": "0.0000006",
+					"completion": "0.0000022"
 				}
 			},
 			{
@@ -4980,8 +5047,20 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000007",
-					"completion": "0.0000068"
+					"prompt": "0.00000062",
+					"completion": "0.00000242"
+				}
+			},
+			{
+				"id": "z-ai/glm-5.2:batch",
+				"created": 1781631930,
+				"hugging_face_id": "zai-org/GLM-5.2",
+				"supported_parameters": [
+					"tools"
+				],
+				"pricing": {
+					"prompt": "0.000000322",
+					"completion": "0.000000989"
 				}
 			},
 			{
@@ -4992,8 +5071,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000084",
-					"completion": "0.0000036"
+					"prompt": "0.0000000699",
+					"completion": "0.0000014"
 				}
 			},
 			{
@@ -5016,8 +5095,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000005",
-					"completion": "0.00000018"
+					"prompt": "0.000000023",
+					"completion": "0.000000068"
 				}
 			},
 			{
@@ -5049,8 +5128,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000028",
-					"completion": "0.0000088"
+					"prompt": "0.00000168",
+					"completion": "0.00000528"
 				}
 			},
 			{
@@ -5061,8 +5140,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.000000322",
-					"completion": "0.000000989"
+					"prompt": "0.00000028",
+					"completion": "0.000001249"
 				}
 			},
 			{
@@ -5127,8 +5206,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00000002",
-					"completion": "0.000000108"
+					"prompt": "0.000000036",
+					"completion": "0.0000005"
 				}
 			},
 			{
@@ -5138,8 +5217,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.0000000999",
-					"completion": "0.000008"
+					"prompt": "0.0000001188",
+					"completion": "0.000005"
 				}
 			},
 			{
@@ -5193,8 +5272,8 @@
 					"tools"
 				],
 				"pricing": {
-					"prompt": "0.00001",
-					"completion": "0.00005"
+					"prompt": "0.000008",
+					"completion": "0.00004"
 				}
 			},
 			{

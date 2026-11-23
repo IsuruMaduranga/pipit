@@ -27,6 +27,10 @@ import { persistedFilePreview, persistIfLarge, sessionResultsDir } from "../../l
 import { KILL_GRACE_MS, waitForChildExit } from "../../lib/shell-run/process-tree.ts";
 import { sessionAlive } from "../../lib/notify/session-lifecycle.ts";
 import { bashSpawn } from "../../lib/shell-run/shell-spawn.ts";
+import { sandboxedCommand, type SandboxRun } from "../../lib/shell-run/sandbox.ts";
+import { trackOriginalCommands } from "../../lib/shell/original-command.ts";
+import { commandHosts } from "../../lib/shell-run/sandbox-settings.ts";
+import { sandboxParams } from "../../lib/shell-run/shell-tool.ts";
 import { ClickToggles, clickToExpand, hiddenToolRenderers, toolRenderers, customMessageText, expandHintFor, formatDuration, formatFireTime, notificationComponent, scheduledTaskComponent } from "../../lib/ui/tui-render.ts";
 import {
 	type BackgroundTask,
@@ -122,6 +126,17 @@ const DEFAULT_MONITOR_TIMEOUT_MS = 300_000;
 const MAX_MONITOR_TIMEOUT_MS = 1_800_000;
 const MONITOR_TIMEOUT_SCHEMA_MAX_MS = 3_600_000;
 const MAX_BLOCK_TIMEOUT_MS = 600_000;
+/**
+ * Claude Code's monitor schema lists `timeout_ms` as required with a default,
+ * and its validator fills a missing one, so its text says "default 5 minutes"
+ * and its ws example leaves the field out. pi's validator treats `default` as
+ * an annotation and rejects the call; this fills the default before
+ * validation, keeping the schema's bytes.
+ */
+function withDefaultMonitorTimeout(args: unknown): unknown {
+	if (!args || typeof args !== "object" || Array.isArray(args) || (args as { timeout_ms?: unknown }).timeout_ms !== undefined) return args;
+	return { ...args, timeout_ms: DEFAULT_MONITOR_TIMEOUT_MS };
+}
 /** A binary WebSocket frame's size, for Claude Code's `[binary frame, N bytes]` event line. */
 function binaryFrameBytes(data: unknown): number {
 	if (data instanceof ArrayBuffer) return data.byteLength;
@@ -199,6 +214,7 @@ function foldEntry(entry: { type: string; timestamp?: string; customType?: strin
 
 function backgroundExtension(pi: ExtensionAPI) {
 	const text = backgroundWords(requireText("background"));
+	const originalCommands = trackOriginalCommands(pi);
 	const cronParameters = cronToolParameters(text.cron);
 	const created = (job: CronJob) => text.cron.created({ job: shownJob(job), maxAgeDays: RECURRING_MAX_AGE_DAYS });
 	const jobList = (jobs: CronJob[]) => text.cron.list({ jobs: jobs.map(shownJob) });
@@ -416,6 +432,8 @@ function backgroundExtension(pi: ExtensionAPI) {
 			command: Type.Optional(Type.String({ description: monitorParams.command })),
 			description: Type.String({ description: monitorParams.description }),
 			timeout_ms: Type.Number({ minimum: 1000, maximum: MONITOR_TIMEOUT_SCHEMA_MAX_MS, default: DEFAULT_MONITOR_TIMEOUT_MS, description: monitorParams.timeoutMs }),
+			// A command monitor may name hosts for itself, as a shell command may; it never asks to leave the sandbox.
+			...sandboxParams(requireText("shell").sandbox, { leave: false }),
 			ws: Type.Optional(
 				Type.Object(
 					{
@@ -426,10 +444,29 @@ function backgroundExtension(pi: ExtensionAPI) {
 				),
 			),
 		}),
+		prepareArguments: withDefaultMonitorTimeout as never,
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			lastCtx = ctx;
 			const startFailed = (failure: MonitorStartFailure) => ({ content: [{ type: "text" as const, text: text.monitor.startFailed(failure) }], details: {}, isError: true });
 			if (Boolean(params.command) === Boolean(params.ws)) return startFailed({ kind: "commandOrSocket" });
+			if (params.ws && commandHosts(params).length > 0) return startFailed({ kind: "hostsNeedCommand" });
+			// A monitor's command runs in the session's shell sandbox like any command the model starts.
+			let command = params.command;
+			const sandboxBash = bashSpawn().spawn?.shell;
+			let sandboxRun: SandboxRun | undefined;
+			if (command && sandboxBash) {
+				// In a worktree session the command arrives wrapped for the worktree: the excluded patterns are matched
+				// against the model's own command, and the sandbox is scoped to the directory it runs in.
+				const original = originalCommands.get(toolCallId);
+				const sandboxed = await sandboxedCommand({ command, original: original?.command ?? command, disable: false, cwd: original?.cwd ?? ctx.cwd, bash: sandboxBash, id: toolCallId });
+				if ("refused" in sandboxed) {
+					if (sandboxed.refused.kind === "hosts") return startFailed({ kind: "hostsRejected", reason: sandboxed.refused.reason });
+					// `noBash` cannot happen here: the call above is made only with a bash.
+					return startFailed({ kind: "sandboxRequired", reason: sandboxed.refused.kind === "unavailable" ? sandboxed.refused.reason : "it has not started" });
+				}
+				command = sandboxed.command;
+				sandboxRun = sandboxed.run;
+			}
 
 			// One-shot modes (`-p` / `--mode json`) exit when the turn settles: the
 			// notifier goes inert, shutdown kills the monitor, and nothing it saw
@@ -474,8 +511,11 @@ function backgroundExtension(pi: ExtensionAPI) {
 			const finished = new Promise<void>((resolve) => {
 				finish = resolve;
 			});
+			// The command's own host list ends with the monitor.
+			void finished.then(() => sandboxRun?.finish());
 
-			const flush = (force = false) => {
+			// `after` follows the batch's events: what the sandbox denied, on the batch that ends the monitor.
+			const flush = (force = false, after = "") => {
 				flushTimer = undefined;
 				if (batchSize(pending) === 0) return;
 				if (!force && notify.holding()) {
@@ -492,7 +532,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 				// end's own recent tail and task_output's result hold those lines.
 				notify(
 					"task-notification",
-					taskNotification({ kind: "monitor", taskId: id, summary: monitorEventSummary(params.description), result: formatMonitorEvents(id, batch, (more) => text.monitor.moreLines({ ...more, logPath: task.logPath })) }),
+					taskNotification({ kind: "monitor", taskId: id, summary: monitorEventSummary(params.description), result: [formatMonitorEvents(id, batch, (more) => text.monitor.moreLines({ ...more, logPath: task.logPath })), after].filter(Boolean).join("\n") }),
 					{ taskId: id, events: batchSize(batch), ...(force ? { [TASK_COMPLETION_KEY]: true } : {}) },
 				);
 			};
@@ -506,6 +546,10 @@ function backgroundExtension(pi: ExtensionAPI) {
 			// Set by the deadline: the end is Claude Code's expiry notice in the last
 			// batch, not a "stopped" notification (findings §94).
 			let expired = false;
+			// The deadline timer, cleared the moment the monitor ends or is stopped:
+			// `task.status` turns terminal only once the spool closes or the kill
+			// grace ends, and an end or stop in that gap is not an expiry.
+			let deadline: NodeJS.Timeout | undefined;
 			let stderrWritten = false;
 			const onEvent = (line: string) => {
 				if (stopRequested) return;
@@ -522,6 +566,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 			const end = (finalStatus: BackgroundTask["status"], note?: string) => {
 				if (status !== "running") return;
 				status = finalStatus;
+				clearTimeout(deadline);
 				if (flushTimer) clearTimeout(flushTimer);
 				const complete = () => {
 					if (task.status !== "running") return;
@@ -531,11 +576,13 @@ function backgroundExtension(pi: ExtensionAPI) {
 					finish();
 					// After shutdown or inside a one-shot run, report through `finished` alone.
 					if (!alive() || oneShot) return;
+					// What the sandbox denied the command rides its end, as a background shell's completion carries it.
+					const denied = sandboxRun?.withViolations("").trim() ?? "";
 					if (expired) {
 						// The expiry line rides the monitor's last batch and is no event.
 						const duration = formatDuration(0, timeoutMs).replace(/ 0[sm]$/, "");
 						pushEvent(pending, text.monitor.expired({ duration, events: eventCount, stderrPath: stderrWritten ? task.logPath : undefined }));
-						flush(true);
+						flush(true, denied);
 						return;
 					}
 					flush(true);
@@ -550,7 +597,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 							toolUseId: toolCallId,
 							status: ccStatus,
 							summary: monitorEndedSummary(params.description, ccStatus, eventCount > 0, note),
-							result: recent || undefined,
+							result: [recent, denied].filter(Boolean).join("\n") || undefined,
 						}),
 						{ taskId: id, status: finalStatus, [TASK_COMPLETION_KEY]: true },
 					);
@@ -583,7 +630,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 				// The session's bash (Git Bash on Windows) — lib/shell-run/shell-spawn.ts.
 				const bash = bashSpawn();
 				if (!bash.spawn) return startFailed({ kind: "noShell", osMessage: bash.error });
-				const tree = spawnOwnedShell({ shell: bash.spawn, command: params.command, cwd: ctx.cwd });
+				const tree = spawnOwnedShell({ shell: bash.spawn, command: command ?? params.command, cwd: ctx.cwd });
 				const child = tree.child;
 				const lines = new MonitorLineSplitter();
 				// Streaming decoders: a UTF-8 character split across reads stays whole.
@@ -608,7 +655,9 @@ function backgroundExtension(pi: ExtensionAPI) {
 				waitForChildExit(child).then(
 					({ code }) => {
 						drain();
-						end(stopRequested ? "stopped" : code === 0 ? "completed" : "failed", code !== null && code !== 0 ? `exit code ${code}` : undefined);
+						// A stopped monitor's exit code reports the kill, not the command (on Windows taskkill
+						// always leaves 1), so its end names none, as a stopped background shell's does.
+						end(stopRequested ? "stopped" : code === 0 ? "completed" : "failed", !stopRequested && code !== null && code !== 0 ? `exit code ${code}` : undefined);
 					},
 					(error: Error) => {
 						drain();
@@ -617,6 +666,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 				);
 				stop = () => {
 					stopRequested = true;
+					clearTimeout(deadline);
 					tree.stop(KILL_GRACE_MS);
 				};
 			} else {
@@ -633,6 +683,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 				ws.addEventListener("close", () => end(stopRequested ? "stopped" : "completed", "socket closed"));
 				stop = () => {
 					stopRequested = true;
+					clearTimeout(deadline);
 					ws.close();
 				};
 			}
@@ -653,12 +704,13 @@ function backgroundExtension(pi: ExtensionAPI) {
 			if (!oneShot) registry.register(task);
 
 			const timeoutMs = Math.min(params.timeout_ms ?? DEFAULT_MONITOR_TIMEOUT_MS, MAX_MONITOR_TIMEOUT_MS);
-			const timer = setTimeout(() => {
-				if (task.status !== "running") return;
-				expired = true;
+			deadline = setTimeout(() => {
+				if (status !== "running" || stopRequested) return;
+				// stop() clears the timer: mark the expiry after it.
 				stop();
+				expired = true;
 			}, timeoutMs);
-			timer.unref?.();
+			deadline.unref?.();
 
 			if (oneShot) {
 				const unhook = whenAborted(signal, stop);
@@ -671,7 +723,9 @@ function backgroundExtension(pi: ExtensionAPI) {
 				// than persist the tail. Without one, say what was lost.
 				const spooled = overflowed && task.logPath ? persistedFilePreview(task.logPath) : undefined;
 				const kept = overflowed && !spooled ? `${spoolLost}${stored.trim()}` : stored.trim() || text.monitor.noEvents;
-				const output = spooled ?? persistIfLarge(kept, { dir: sessionResultsDir(ctx), id: `monitor-${id}` });
+				const shown = spooled ?? persistIfLarge(kept, { dir: sessionResultsDir(ctx), id: `monitor-${id}` });
+				// What the sandbox denied the command follows its events.
+				const output = sandboxRun ? sandboxRun.withViolations(shown) : shown;
 				const finalStatus = task.status;
 				const end: MonitorEnd =
 					finalStatus !== "stopped"
@@ -1036,12 +1090,20 @@ function backgroundExtension(pi: ExtensionAPI) {
 		);
 		return messages ? { messages } : undefined;
 	});
+	// Everything a switch or a reload stops, from the one list every extension
+	// answers into: the registry's tasks (this extension's own answer) and the
+	// work that never enters the registry (a running workflow, a resident
+	// agent's turn that no task covers).
+	const runningWork = (): Array<{ id: string; description: string }> =>
+		querySessionWork(pi.events)
+			.tasks.filter((task) => task.status === "running")
+			.map(({ id, description }) => ({ id, description }));
 	// A switch stops everything below, so ask first. pi can cancel a switch but
 	// not a quit; the /tasks dialog says that quitting stops it (switch-guard.ts).
 	const confirmSwitch = async (ctx: ExtensionContext, action: string): Promise<{ cancel: true } | undefined> => {
 		if (!ctx.hasUI) return undefined;
 		const title = switchWarning(
-			registry.running().map((t) => ({ id: t.id, label: t.description })),
+			runningWork().map((t) => ({ id: t.id, label: t.description })),
 			cron.list().map((j) => ({ id: j.id, label: describeCadence(j.cron) })),
 			action,
 		);
@@ -1059,7 +1121,7 @@ function backgroundExtension(pi: ExtensionAPI) {
 		// running dies with this instance — the replacement instance has no handle
 		// on it — and the replacement is told (see shutdownNotice); a quit
 		// needs no note. A reload keeps the conversation, so its note says so.
-		const running = registry.running();
+		const running = runningWork();
 		// A reload re-arms the jobs from the branch: only the tasks stop.
 		const jobs = event.reason === "reload" ? [] : cron.list();
 		if ((running.length > 0 || jobs.length > 0) && event.reason !== "quit") {

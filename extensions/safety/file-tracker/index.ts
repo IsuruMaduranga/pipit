@@ -44,7 +44,8 @@ import { parseRules, ruleMatches } from "../../lib/rules/matcher.ts";
 import { loadPermissionSettings } from "../../lib/rules/settings.ts";
 import { type FileObservation, filesSeenOnBranch, keptReadPaths, keptShellReadPaths, shellCallsOnBranch } from "./replay.ts";
 import { type RestoredRead, restoreBlocks, restoreCandidates } from "./restore.ts";
-import { fileToolResultContent } from "./results.ts";
+import { executedErrorKind, fileToolResultContent, refusalKind } from "./results.ts";
+import { FILE_ERROR_CHANNEL, type FileErrorQuery } from "../../lib/ui/result-summary-files.ts";
 import { shellReadPaths, shownInFull } from "./shell-reads.ts";
 import { sessionWorkCwd, WORKTREE_CHANNEL, type WorktreeLocation } from "../../lib/agents/worktree-channel.ts";
 import { describeChanges, type FileStamp, FileTracker, guardDecision } from "./tracker.ts";
@@ -214,7 +215,7 @@ function restoreAllowed(ctx: ExtensionContext): (path: string) => boolean {
 		return (path) => {
 			const real = tryRealpath(path);
 			if (!real || !isPathAtOrUnder(real, root)) return false;
-			return !rules.some((rule) => ruleMatches(rule, "read", path, ctx.cwd) || ruleMatches(rule, "read", real, ctx.cwd));
+			return !rules.some((rule) => ruleMatches(rule, "read", path, ctx.cwd, true) || ruleMatches(rule, "read", real, ctx.cwd, true));
 		};
 	} catch {
 		return () => false;
@@ -265,6 +266,13 @@ function fileTrackerExtension(pi: ExtensionAPI) {
 	pi.events.on(CHILD_WROTE_CHANNEL, (data) => {
 		const wrote = data as ChildWrote | undefined;
 		if (wrote?.path) childWrites.set(wrote.path, wrote.agent);
+	});
+	// The transcript asks whether a failed file tool's text is one of our refusals (display only).
+	pi.events.on(FILE_ERROR_CHANNEL, (data) => {
+		const query = data as FileErrorQuery | undefined;
+		if (!query || typeof query.text !== "string" || !GUARDED_TOOLS.has(query.toolName)) return;
+		const path = pathOf(query.args, query.cwd);
+		if (path) query.kind = refusalKind(query.text, { path, tool: query.toolName }, fileTrackerText) ?? query.kind;
 	});
 	/** Observe a file the model read or wrote, and record it as touched at its current modification time. */
 	const touch = (path: string) => {
@@ -399,7 +407,7 @@ function fileTrackerExtension(pi: ExtensionAPI) {
 		// successful edit does not make the file look stale to the next edit.
 		// What the model saw, on the result: a resume compares it with the disk.
 		const observation = event.isError ? undefined : touch(path);
-		const content = fileToolResultContent({
+		const fileResult = {
 			toolName: event.toolName,
 			isError: event.isError,
 			content: event.content,
@@ -407,11 +415,17 @@ function fileTrackerExtension(pi: ExtensionAPI) {
 			cwd: ctx.cwd,
 			existedBefore,
 			isEmptyFile: () => statIfPresent(path)?.size === 0,
-		}, fileTrackerText);
-		if (!content && !observation) return undefined;
+		};
+		const content = fileToolResultContent(fileResult, fileTrackerText);
+		// A failure gets its kind on the details, for the transcript's short line (never sent to the model).
+		const fileError = event.isError ? executedErrorKind(fileResult) : undefined;
+		if (!content && !observation && !fileError) return undefined;
+		const prior = (event.details as Record<string, unknown> | undefined) ?? {};
 		return {
 			...(content ? { content } : {}),
-			...(observation ? { details: { ...((event.details as Record<string, unknown> | undefined) ?? {}), productFile: observation } } : {}),
+			...(observation || fileError
+				? { details: { ...prior, ...(observation ? { productFile: observation } : {}), ...(fileError ? { fileError } : {}) } }
+				: {}),
 		};
 	});
 

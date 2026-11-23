@@ -40,6 +40,7 @@ import type { OptionSpec } from "../shell/read-only-options.ts";
 import { readOnlyCommandProblems, readOnlyCommandSpecs } from "../shell/product-read-only.ts";
 import type { SourceProvider } from "./sources.ts";
 import { type OpenRouterRoutingDefault, openRouterRoutingProblems } from "./openrouter-routing.ts";
+import { type ProductSandbox, productSandboxProblems } from "./product-sandbox.ts";
 import { parseToolFlags, type PiToolFilter, piRegisters, piToolFilter, piToolFilterKey } from "./pi-tool-flags.ts";
 import { launchSetsThinking, parseThinkingFlags } from "./pi-thinking-flags.ts";
 import { type ThinkingDefaults, thinkingDefaultProblems } from "./thinking-defaults.ts";
@@ -146,7 +147,7 @@ export const TEXT_GROUP_READERS: Readonly<Record<OptionalGroup, readonly Feature
 	toolStyle: ["tool-style"],
 	compaction: ["compaction"],
 	workflow: ["workflow"],
-	shell: ["bash", "powershell"],
+	shell: ["bash", "powershell", "sandbox", "background"],
 	doctor: ["doctor"],
 	handback: ["subagents", "workflow"],
 	subagents: ["subagents", "workflow"],
@@ -178,6 +179,7 @@ const PROFILE_FIELDS: Readonly<Record<keyof Profile, true>> = {
 	settings: true,
 	defaultThinkingLevels: true,
 	openRouterRouting: true,
+	sandbox: true,
 	sources: true,
 	globalAgentsFiles: true,
 };
@@ -236,6 +238,10 @@ export interface ResolvedProfile {
 	defaultThinkingLevels: ThinkingDefaults;
 	/** The OpenRouter routing defaults by model-id vendor (lib/request/openrouter-routing-defaults.ts). */
 	openRouterRouting: ReadonlyMap<string, OpenRouterRoutingDefault>;
+	/** The sandbox's starting settings and lock (lib/profile/product-sandbox.ts); absent when the profile declares none. */
+	sandbox?: ProductSandbox;
+	/** The user's switches that tried to turn a locked sandbox's feature off and were ignored, one line each; absent when none did. */
+	sandboxOffIgnored?: readonly string[];
 	/** The user's own profile over this one, when the launch chose one (lib/profile/user-profile.ts). */
 	user?: UserProfile;
 }
@@ -248,16 +254,20 @@ function envList(env: NodeJS.ProcessEnv, name: string): string[] {
 }
 
 /**
- * The product's extension folders the manifest's glob loads: every folder,
- * a linked one included, with an `index.ts`. Read on each resolve, not once
- * per process: /reload globs the entries again, and a folder added since must
- * not stop the wrapper (a few file checks per extension copy at startup).
+ * The product's extension folders the manifest's glob loads: every real
+ * folder with an `index.ts`. A linked folder is none: pi expands the entry
+ * with Node's `fs.globSync`, whose `*` does not follow a symbolic link, so a
+ * profile listing one would run an extension the session never loads. Read
+ * on each resolve, not once per process: /reload globs the entries again, and
+ * a folder added since must not stop the wrapper (a few file checks per
+ * extension copy at startup).
  */
 export function productExtensionFolders(productDir: string): string[] {
 	const root = resolve(productDir, PRODUCT_EXTENSIONS_DIR);
 	if (!existsSync(root)) return [];
-	return readdirSync(root)
-		.filter((name) => isProductExtensionFolder(name) && existsSync(join(root, name, "index.ts")))
+	return readdirSync(root, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && isProductExtensionFolder(entry.name) && existsSync(join(root, entry.name, "index.ts")))
+		.map((entry) => entry.name)
 		.sort();
 }
 
@@ -271,7 +281,7 @@ function productExtensionChoice(listed: unknown, folders: readonly string[]): { 
 		return { choice: new Map(folders.map((name) => [name, false])), problems: [`its "extensions" must be an array of folder names under ${PRODUCT_EXTENSIONS_DIR}/`] };
 	}
 	const names = listed as readonly string[] | undefined;
-	const problems = (names ?? []).filter((name) => !folders.includes(name)).map((name) => `it lists the extension "${name}", which has no folder ${PRODUCT_EXTENSIONS_DIR}/${name}/ with an index.ts`);
+	const problems = (names ?? []).filter((name) => !folders.includes(name)).map((name) => `it lists the extension "${name}", which has no folder ${PRODUCT_EXTENSIONS_DIR}/${name}/ with an index.ts (a linked folder is none: pi's glob does not follow links)`);
 	return { choice: new Map(folders.map((name) => [name, names === undefined || names.includes(name)])), problems };
 }
 
@@ -295,7 +305,9 @@ function childExtensionProblems(entries: readonly string[], productDir: string, 
 		} else if (!existsSync(path)) {
 			problems.push(`child extension "${entry}" does not exist (${path})`);
 		} else if (!choice.has(folder)) {
-			problems.push(`child extension "${entry}" must sit in a product extension folder, one with an index.ts (${PRODUCT_EXTENSIONS_DIR}/<name>/), whose name its productExtension wrapper carries`);
+			// A child-only folder was legal before each profile chose its extensions (decisions/bi-fork.md): name the move.
+			const fix = folder !== inside && isProductExtensionFolder(folder) ? `give ${PRODUCT_EXTENSIONS_DIR}/${folder}/ an index.ts (one exporting productExtension("${folder}", () => {}) registers nothing in the main session) or move the file into a folder that has one` : `move it into a folder that has one`;
+			problems.push(`child extension "${entry}" must sit in a product extension folder, one with an index.ts (${PRODUCT_EXTENSIONS_DIR}/<name>/), whose name its productExtension wrapper carries: ${fix}`);
 		} else if (choice.get(folder) === false) {
 			problems.push(`child extension "${entry}" is in the folder "${folder}", which the profile's extensions list leaves out`);
 		}
@@ -331,6 +343,13 @@ export function resolveProfile(profile: Profile, env: NodeJS.ProcessEnv, profile
 	const envOff = envList(env, envName("FEATURES_OFF"));
 	const envTools = envList(env, envName("TOOLS_OFF"));
 	for (const id of [...envOff, ...(user?.featuresOff ?? [])]) featureMap[id] = false;
+	// A locked sandbox (decisions/sandbox.md) stays on: the user's off-switches for it are ignored, and listed where the lock's other ignored settings are.
+	const sandboxOffIgnored: string[] = [];
+	if (profile.sandbox?.locked === true && profile.features.sandbox !== false && featureMap.sandbox === false) {
+		featureMap.sandbox = true;
+		if (envOff.includes("sandbox")) sandboxOffIgnored.push(`sandbox in ${envName("FEATURES_OFF")}`);
+		if (user?.featuresOff.includes("sandbox")) sandboxOffIgnored.push(`sandbox in the featuresOff of the profile "${user.name}"`);
+	}
 	const tools = new Map<string, ToolSwitch>(Object.entries(profile.tools));
 	for (const name of [...envTools, ...(user?.toolsOff ?? [])]) tools.set(name, { ...tools.get(name), enabled: false });
 	for (const name of user?.toolsDeferred ?? []) tools.set(name, { ...tools.get(name), deferred: true });
@@ -365,6 +384,9 @@ export function resolveProfile(profile: Profile, env: NodeJS.ProcessEnv, profile
 	// The effort feature applies the levels: declared with it off, they would never take effect.
 	if (profile.features.effort === false && Object.keys(profile.defaultThinkingLevels ?? {}).length > 0) problems.push(`it declares defaultThinkingLevels but turns off "effort", the feature that applies them`);
 	problems.push(...openRouterRoutingProblems(profile.openRouterRouting ?? {}));
+	problems.push(...productSandboxProblems(profile.sandbox));
+	// The sandbox feature starts the sandbox: declared with it off, the block would never take effect.
+	if (profile.features.sandbox === false && profile.sandbox !== undefined) problems.push(`it declares a sandbox block but turns off "sandbox", the feature that runs it`);
 	if (problems.length > 0) throw new Error(`Invalid profile: ${problems.join("; ")}.`);
 	const features = enabledFeatures(featureMap);
 	const disabledTools = new Set([...tools].filter(([, sw]) => sw.enabled === false).map(([name]) => name));
@@ -418,6 +440,8 @@ export function resolveProfile(profile: Profile, env: NodeJS.ProcessEnv, profile
 		settings: new Map(Object.entries(profile.settings ?? {})),
 		defaultThinkingLevels: { ...profile.defaultThinkingLevels },
 		openRouterRouting: new Map(Object.entries(profile.openRouterRouting ?? {})),
+		...(profile.sandbox ? { sandbox: profile.sandbox } : {}),
+		...(sandboxOffIgnored.length > 0 ? { sandboxOffIgnored } : {}),
 		...(user ? { user } : {}),
 	};
 }
@@ -558,10 +582,14 @@ export function profileText(): ProfileText {
 	return activeProfile().text;
 }
 
-/** Stop the process: an invalid profile must never run degraded or without its gate. */
-export function failClosed(error: unknown): never {
+/**
+ * Stop the process: an invalid profile must never run degraded or without its
+ * gate. `subject` names what is invalid when it is not the profile itself (a
+ * product extension's entry file).
+ */
+export function failClosed(error: unknown, subject = `The profile in ${profileDirName}/, or a switch over it,`): never {
 	const reason = error instanceof Error ? error.message : String(error);
-	process.stderr.write(`\nThe profile in ${profileDirName}/, or a switch over it, is invalid, so the harness will not start: ${reason}\n\n`);
+	process.stderr.write(`\n${subject} is invalid, so the harness will not start: ${reason}\n\n`);
 	process.exit(1);
 }
 

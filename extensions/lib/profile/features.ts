@@ -47,6 +47,7 @@ export const FEATURES = {
 	"file-tracker": { entries: ["safety/file-tracker/index.ts"], guard: true },
 	memory: { entries: ["context/memory/index.ts"] },
 	permissions: { entries: ["safety/permissions/index.ts"], required: true },
+	sandbox: { entries: ["safety/sandbox/index.ts", "safety/sandbox/child.ts"] },
 	"ask-user": { entries: ["tools/ask-user/index.ts"] },
 	skill: { entries: ["tools/skill/index.ts"] },
 	background: { entries: ["tools/background/index.ts"] },
@@ -72,6 +73,7 @@ export const FEATURES = {
 	"run-status": { entries: ["request/run-status/index.ts"], required: true },
 	init: { entries: ["commands/init/index.ts"] },
 	clear: { entries: ["commands/clear/index.ts"] },
+	help: { entries: ["commands/help/index.ts"] },
 	tasks: { entries: ["tools/tasks/index.ts"] },
 	"plan-mode": { entries: ["safety/plan-mode/index.ts"] },
 	notebook: { entries: ["tools/notebook/index.ts"] },
@@ -81,6 +83,7 @@ export const FEATURES = {
 	lsp: { entries: ["tools/lsp/index.ts"] },
 	mcp: { entries: ["tools/mcp/index.ts"] },
 	doctor: { entries: ["commands/doctor/index.ts"] },
+	context: { entries: ["commands/context/index.ts"] },
 	// Required: a product that registers secret values relies on every result passing through it.
 	"secret-values": { entries: ["safety/secret-values/index.ts"], required: true },
 	"context-management": { entries: ["request/context-management/index.ts"] },

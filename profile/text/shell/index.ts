@@ -9,6 +9,7 @@ import type { LiveTools, ShellText } from "../../../extensions/sdk/profile.ts";
 import { BASH_EDIT_LINE, BASH_MONITOR_SLEEP, BASH_MONITOR_STREAM, BASH_MONITOR_WAIT, BASH_PARAMS, BASH_YIELD_LINE, BASH_YIELD_WAIT, bashDescription } from "./bash-description.ts";
 import { POWERSHELL_EDIT_LINE, POWERSHELL_MONITOR_CLAUSE, POWERSHELL_NO_TASK_TOOLS, POWERSHELL_TASK_TOOLS, POWERSHELL_YIELD_CLAUSE, powerShellToolDescription } from "./powershell-description.ts";
 import { type ToolPassages, withoutOff } from "../../../extensions/sdk/profile.ts";
+import { shellSandboxText } from "./sandbox-text.ts";
 
 
 const BASH_PASSAGES: ToolPassages = {
@@ -43,4 +44,5 @@ export const shellText = (live: LiveTools): ShellText => ({
 		description: "A short, plain description of what the command does, in the active voice.",
 		run_in_background: "True to run the command in the background.",
 	},
+	sandbox: shellSandboxText,
 });

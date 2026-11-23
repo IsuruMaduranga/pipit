@@ -89,6 +89,8 @@ export type ReminderPlacement = "first-prepend" | "sticky-append" | "last-append
  * moves into that message instead (`movesToSystemRole`, lib/request/system-role.ts).
  */
 export const CONTEXT_ORDER = {
+	/** The shell sandbox's section, in front of the environment block as in Claude Code (safety/sandbox). */
+	sandbox: 0,
 	environment: 1,
 	modelLine: 2,
 	/** One Code's note that a `-p`/json run ends with its turn (`lib/notify/notifications.ts oneShotSessionNote`); not Claude Code's. */
@@ -239,6 +241,23 @@ export interface RenderedBlock {
 	text: string;
 	/** What the block tells the model, recorded with the request that carries it. */
 	facts?: ToldFact[];
+}
+
+/**
+ * Ask the system-reminder extension for its live `first-prepend` stack and
+ * sticky states (`StackQuery`, answered synchronously). Read only: answering
+ * renders, records and tells nothing, so a request not yet sent can be
+ * estimated (`/context`) without changing it. An owner that queues its block
+ * only when the first prompt starts (the environment block, the skills
+ * listing) adds what it would queue, without queueing it.
+ */
+export const STACK_QUERY_CHANNEL = brandedId("stack-query");
+
+export interface StackQuery {
+	/** The asking command's context (cwd, model). */
+	ctx?: unknown;
+	stack?: StackEntry[];
+	sticky?: StickyEntry[];
 }
 
 /** The RENDER_CHANNEL payload. */

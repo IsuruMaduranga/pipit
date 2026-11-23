@@ -45,6 +45,36 @@ export interface ShellParams {
 	run_in_background: string;
 }
 
+/** The words of the shell sandbox (lib/shell-run/sandbox.ts), for a session whose settings turn it on. */
+export interface ShellSandboxText {
+	/** The Bash tool's `dangerouslyDisableSandbox` parameter. */
+	disableParam: string;
+	/** The Bash tool's `allowed_domains` parameter: hosts for this one command, in auto mode. */
+	allowedDomainsParam: string;
+	/**
+	 * Why a host was refused in auto mode, inside the command's
+	 * `<sandbox_violations>` block: the call did not name it.
+	 */
+	hostNotListed: string;
+	/**
+	 * The first-message section. `filesystem` is the session's rules as JSON;
+	 * `unsandboxedAllowed` says the model may ask to leave the sandbox
+	 * (`sandbox.allowUnsandboxedCommands`).
+	 */
+	section(p: { platform: "darwin" | "linux"; filesystem: string; unsandboxedAllowed: boolean }): string;
+	/** The tail note when a session told of a sandbox no longer has one. */
+	turnedOff: string;
+	/** The section when the sandbox could not start; `required` says commands are refused without it. */
+	unavailable(p: { reason: string; required: boolean }): string;
+	/**
+	 * A shell call refused: the sandbox is required and is not running
+	 * (`unavailable`), the sandbox runs every command through a bash
+	 * and the machine has none (`noBash`), or its own host list has an entry the
+	 * sandbox rejects (`hosts`).
+	 */
+	refused(p: { kind: "unavailable"; reason: string } | { kind: "noBash" } | { kind: "hosts"; reason: string }): string;
+}
+
 export interface ShellText {
 	/** The system prompt guideline when PowerShell is the primary shell (Claude Code names it so). */
 	powershellPrimary: string;
@@ -53,6 +83,7 @@ export interface ShellText {
 	bashParams: ShellParams;
 	powershellDescription(p: { edition: PowerShellEditionName }): string;
 	powershellParams: ShellParams;
+	sandbox: ShellSandboxText;
 }
 
 /** The group's results, refusals and notes, which the base words (`shellResultText`). */
@@ -91,6 +122,14 @@ export interface ShellResultText {
 	spoolLost(p: { keptChars: number }): string;
 }
 
+/** What a background run gives instead of a detached process, one clause per live tool that serves it. */
+function detachedRunPromises(live: LiveTools): string {
+	const clauses = ["it returns a task id immediately", "completion arrives as a task notification"];
+	if (live.has("task_output")) clauses.push("output stays readable with task_output");
+	if (live.has("task_stop")) clauses.push("it can be stopped with task_stop");
+	return clauses.length === 2 ? clauses.join(" and ") : `${clauses.slice(0, -1).join(", ")}, and ${clauses.at(-1)}`;
+}
+
 function blocked(block: ShellBlock, live: LiveTools): string {
 	switch (block.kind) {
 		case "sleep": {
@@ -114,9 +153,7 @@ function blocked(block: ShellBlock, live: LiveTools): string {
 		case "detach":
 			return (
 				`Blocked: this command detaches a process with ${block.via}, leaving an orphan this session cannot manage — its output and exit status would be lost. ` +
-				(live.has("task_output") && live.has("task_stop")
-					? "Run it with run_in_background: true instead: it returns a task id immediately, completion arrives as a task notification, output stays readable with task_output, and it can be stopped with task_stop. "
-					: "Run it with run_in_background: true instead: it returns a task id immediately and completion arrives as a task notification. ") +
+				`Run it with run_in_background: true instead: ${detachedRunPromises(live)}. ` +
 				"If you need shell-level parallelism inside one command, end it with `wait` so the children are reaped."
 			);
 		case "editor":

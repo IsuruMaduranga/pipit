@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { DEFER_CHANNEL } from "../../extensions/lib/request/deferred.ts";
 import { captureRequest, type RequestCapture } from "../../extensions/lib/side-calls/request-replay.ts";
-import { forkCacheExtension, withParentParameters } from "../../extensions/agents/subagents/fork-cache.ts";
+import { forkCacheExtension, withParentParameters, withSavedParentTools } from "../../extensions/agents/subagents/fork-cache.ts";
 import { sendToMainTool } from "../../extensions/agents/subagents/send-to-main-tool.ts";
 import { subagentResultText } from "../../extensions/lib/agents/subagent-text.ts";
 import { createFakeCtx, createFakePi } from "./helpers/fake-pi.ts";
@@ -43,6 +43,20 @@ describe("forkCacheExtension", () => {
 			ctx,
 		);
 		expect(payload?.messages).toEqual([{ role: "system", content: "parent" }, { role: "user", content: "hi" }, { role: "user", content: "fork task" }]);
+	});
+
+	it("splices a body pi-ai renders again in the same call, until the next context pass", async () => {
+		const { fake, ctx, messages } = setup(32000);
+		await fake.fireOne("context_with_system", { messages }, ctx);
+		const body = () => ({ payload: { messages: [{ role: "system", content: "fork" }, { role: "user", content: "fork task" }], tools: [] } });
+		const spliced = [{ role: "system", content: "parent" }, { role: "user", content: "hi" }, { role: "user", content: "fork task" }];
+		for (let send = 0; send < 2; send++) {
+			const payload = await fake.fireOne<Record<string, unknown>>("before_provider_request", body(), ctx);
+			expect(payload?.messages).toEqual(spliced);
+		}
+		// A context pass that shapes nothing (here: no covered message) ends it.
+		await fake.fireOne("context_with_system", { messages: [{ role: "user", content: "other", timestamp: 99 }] }, ctx);
+		expect(await fake.fireOne("before_provider_request", body(), ctx)).toBeUndefined();
 	});
 
 	it("sends the fork whole when the tail leaves too little output room", async () => {
@@ -132,5 +146,15 @@ describe("withParentParameters", () => {
 		const wrong = (await send.execute("c2", { to: "fork-2", message: "hi" }, undefined, undefined, undefined as never)) as { isError?: boolean };
 		expect(sent).toEqual(["found it"]);
 		expect(wrong.isError).toBe(true);
+	});
+});
+
+describe("withSavedParentTools", () => {
+	it("adds the saved tools the parent no longer has, keeps the current schema where both have one, and ignores a malformed file", () => {
+		const current = [{ name: "read", parameters: { now: true } }];
+		const saved = [{ name: "read", parameters: { then: true } }, { name: "ask_user_question", parameters: { type: "object" } }, { parameters: {} }, null];
+		expect(withSavedParentTools(current, saved)).toEqual([...current, { name: "ask_user_question", parameters: { type: "object" } }]);
+		for (const bad of [undefined, {}, "x"]) expect(withSavedParentTools(current, bad)).toBe(current);
+		expect(withSavedParentTools(current, [{ name: "read", parameters: {} }])).toBe(current);
 	});
 });

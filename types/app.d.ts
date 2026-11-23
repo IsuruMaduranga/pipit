@@ -47,10 +47,17 @@ declare module "*/app-launch.mjs" {
 		env: Record<string, string | undefined>,
 		options: { home?: string; appVersion: string; installMethod: "brew" | "npm" },
 	): string;
+	/** pi's settings for an agent directory that has none yet. */
+	export function firstRunSettings(theme: string, env?: Record<string, string | undefined>): Record<string, unknown>;
 	export function childProcessEnv(env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform): NodeJS.ProcessEnv;
 }
 
 /** Types for the plain-JS replaced-built-ins module (extensions/lib/app/replaced-builtins.mjs). */
+declare module "*/create-app.mjs" {
+	/** pi's exit hint with the app's command name in place of `pi`. */
+	export function rebrandResumeHint(chunk: string, bin: string): string;
+}
+
 declare module "*/replaced-builtins.mjs" {
 	export interface ReplacedBuiltin {
 		name: string;
