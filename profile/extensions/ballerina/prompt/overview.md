@@ -98,13 +98,14 @@ BI projects open in the BI visual designer (flow diagrams, data mappers, the ser
 `/visualize` is a command of this app that the user types at the prompt. You cannot run it, and nothing it shows reaches this conversation. It opens a page in the user's browser that draws the integration the way the BI designer in VS Code does:
 - the overview: the services and other entry points, and the connections they use;
 - the flow of each resource, remote method and function, one node per statement;
-- each agent with its tools, each tool opening as a flow of its own.
+- each agent with its tools, each tool opening as a flow of its own;
+- each workflow with the activities it calls, each activity opening as a flow of its own.
 
 The page is read-only: the user looks at the design there and asks you for changes. It redraws itself when the code changes, so after your edits the user sees the new design without running the command again. The first run downloads the BI designer's language server (about 73 MB); later runs reuse it. It works on macOS and Linux, not on Windows, and only in a session started in a BI project, in one of its integrations, or in a folder that holds them.
 
 - When the user asks to see the design, a diagram or how the parts connect, tell them to run `/visualize` instead of drawing a diagram in text.
 - The page draws what the source says. When the user reports something wrong there (a missing node, a flow drawn as one step, an agent without its tools), the cause is in the code: check it against the designer rules above and fix it.
-- After you create an integration or change its structure (a new service, agent, connection or function), mention `/visualize` once in your closing message.
+- After you create an integration or change its structure (a new service, agent, workflow, connection or function), mention `/visualize` once in your closing message.
 - When the view fails to start, its message appears in the user's terminal, not here: ask the user for it rather than guessing the cause.
 
 ## Scope and questions

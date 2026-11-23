@@ -47,7 +47,7 @@ const ENGLISH: EnglishPhrases = {
 	// A skill, not the tool that loads one.
 	skill: [/a loaded skill/, /a skill shows/],
 	// Ballerina's workflow module and the construct it builds.
-	workflow: [/ballerina\/workflow/, /Durable workflow/, /A workflow goes in/],
+	workflow: [/ballerina\/workflow/, /Durable workflow/, /A workflow goes in/, /each workflow with the activities/, /agent, workflow, connection/],
 	edit: [/\b(each|every|first) edit\b/, /\b[Nn]ever edit\b/, /\bedit it visually/],
 };
 
@@ -352,7 +352,8 @@ describe("the # Ballerina section", () => {
 	it("explains /visualize: the user's command, what it draws, and how to answer about it", () => {
 		const text = render() ?? "";
 		expect(text).toContain("## The diagram view (`/visualize`)\n\n`/visualize` is a command of this app that the user types at the prompt. You cannot run it, and nothing it shows reaches this conversation.");
-		expect(text).toContain("- each agent with its tools, each tool opening as a flow of its own.");
+		expect(text).toContain("- each agent with its tools, each tool opening as a flow of its own;");
+		expect(text).toContain("- each workflow with the activities it calls, each activity opening as a flow of its own.");
 		expect(text).toContain("It redraws itself when the code changes");
 		expect(text).toContain("It works on macOS and Linux, not on Windows");
 		expect(text).toContain("tell them to run `/visualize` instead of drawing a diagram in text");

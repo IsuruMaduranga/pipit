@@ -12,11 +12,13 @@ import "theme:light";
 import "theme:dark";
 import "./page.css";
 import { agentFlow, type Components, functionPlaces, keepChildren, toolKey, toolNames } from "./agent-tools";
+import { activityKey, nodeById, nodeTarget, workflowActivities, type WorkflowDesign } from "./workflows";
 
 type Position = { line: number; offset: number };
 type Location = { filePath?: string; fileName?: string; startLine: Position; endLine: Position };
 type Item = { key: string; label: string; verb?: string; location?: Location; children?: Item[]; agent?: boolean };
-type Sidebar = { entryPoints: Item[]; agents: Item[]; functions: Item[] };
+/** `workflows` carry the activities each calls as children once the design model says; `activities` holds every activity. */
+type Sidebar = { entryPoints: Item[]; agents: Item[]; workflows: Item[]; activities: Item[]; functions: Item[] };
 type View = { kind: "overview" } | { kind: "flow"; key?: string; title: string; location: Location };
 type Load<T> = { state: "loading" } | { state: "ready"; value: T } | { state: "failed"; message: string };
 /** A model with the package and view it was fetched for: a render never hands one view's model to the other's diagram. */
@@ -28,6 +30,8 @@ type FlowModel = React.ComponentProps<typeof FlowDiagram>["model"];
 type FlowNode = FlowModel["nodes"][number];
 /** What a click in the overview hands back: a function, a resource, or the automation. */
 type OverviewTarget = Parameters<OverviewProps["onFunctionSelect"]>[0] | Parameters<OverviewProps["onAutomationSelect"]>[0];
+/** A workflow box clicked in the overview. */
+type OverviewWorkflow = Parameters<NonNullable<OverviewProps["onWorkflowSelect"]>>[0];
 /** `agent`: the flow is an agent's declaration, drawn the way the designer's agent view does. */
 type Drawn = { kind: "overview"; design: DesignModel } | { kind: "flow"; flow: FlowModel; agent: boolean };
 type Shown = { state: "loading" } | { state: "ready"; drawn: Drawn; pkg: string; view: View } | { state: "failed"; message: string; pkg: string; view: View };
@@ -129,13 +133,33 @@ function sidebarOf(result: { artifacts?: Record<string, Record<string, Artifact>
             .filter((artifact) => artifact.location)
             .map((artifact) => ({ key: `${prefix}:${artifact.name}`, label: artifact.name ?? "?", location: artifact.location, agent }))
             .sort((a, b) => a.label.localeCompare(b.label));
-    return { entryPoints, agents: named("Agents", "agent", true), functions: named("Functions", "function") };
+    const workflows = Object.values(artifacts["Workflows"] ?? {});
+    const ofType = (type: string, prefix: string) =>
+        workflows
+            .filter((artifact) => artifact.type === type && artifact.location)
+            .map((artifact) => ({ key: `${prefix}:${artifact.name}`, label: artifact.name ?? "?", location: artifact.location }))
+            .sort((a, b) => a.label.localeCompare(b.label));
+    return {
+        entryPoints,
+        agents: named("Agents", "agent", true),
+        workflows: ofType("WORKFLOW", "workflow"),
+        activities: ofType("ACTIVITY", "activity"),
+        functions: named("Functions", "function"),
+    };
 }
 
 const allItems = (sidebar: Sidebar): Item[] => [
-    ...[...sidebar.entryPoints, ...sidebar.agents].flatMap((item) => [item, ...(item.children ?? [])]),
+    ...[...sidebar.entryPoints, ...sidebar.agents, ...sidebar.workflows].flatMap((item) => [item, ...(item.children ?? [])]),
+    ...sidebar.activities,
     ...sidebar.functions,
 ];
+
+/** The activities no workflow is known to call: listed on their own, once the workflows' children are known. */
+const looseActivities = (sidebar: Sidebar): Item[] => {
+    if (sidebar.workflows.some((workflow) => workflow.children === undefined)) return [];
+    const called = new Set(sidebar.workflows.flatMap((workflow) => (workflow.children ?? []).map((child) => child.label)));
+    return sidebar.activities.filter((activity) => !called.has(activity.label));
+};
 
 const baseName = (path = "") => path.split(/[\\/]/).pop() ?? "";
 /** The sidebar item at a location, matched by file name and start line: how a click in the overview finds its item. */
@@ -160,6 +184,27 @@ async function withTools(sidebar: Sidebar, pkg: string): Promise<Sidebar> {
     });
     return { ...sidebar, agents };
 }
+
+// ---- Workflow activities (workflows.ts holds the logic).
+
+/** The sidebar with each workflow's activities as its children, from the design model. Rejects when the language server cannot answer. */
+async function withActivities(sidebar: Sidebar, pkg: string): Promise<Sidebar> {
+    if (sidebar.workflows.length === 0) return sidebar;
+    const calls = workflowActivities((await api<{ designModel?: WorkflowDesign }>("design", { package: pkg })).designModel);
+    const places = new Map(sidebar.activities.map((activity) => [activity.label, activity.location]));
+    const workflows = sidebar.workflows.map((workflow) => {
+        const children = (calls.get(workflow.label) ?? []).flatMap((name) => {
+            const location = places.get(name);
+            return location ? [{ key: activityKey(workflow.key, name), label: name, location }] : [];
+        });
+        return { ...workflow, children };
+    });
+    return { ...sidebar, workflows };
+}
+
+/** The sidebar with what each item needs a further request for: the agents' tools and the workflows' activities. */
+const detailed = (sidebar: Sidebar, pkg: string): Promise<Sidebar> =>
+    Promise.all([withTools(sidebar, pkg), withActivities(sidebar, pkg)]).then(([tools, activities]) => ({ ...tools, workflows: activities.workflows }));
 
 // ---- Keeping the overview's pan and zoom across a refresh.
 // The overview fits itself to the screen after every model change, and draws
@@ -342,18 +387,23 @@ function App() {
             try {
                 const fresh = sidebarOf(await api("artifacts", { package: pkg }));
                 items = fresh;
-                // The agents keep their last known tools on screen until the new lists arrive.
-                if (!cancelled) setSidebar((previous) => ({ state: "ready", value: { ...fresh, agents: keepChildren(fresh.agents, previous.state === "ready" ? previous.value.agents : undefined) } }));
+                // The agents and workflows keep their last known children on screen until the new lists arrive.
+                if (!cancelled) {
+                    setSidebar((previous) => {
+                        const before = previous.state === "ready" ? previous.value : undefined;
+                        return { state: "ready", value: { ...fresh, agents: keepChildren(fresh.agents, before?.agents), workflows: keepChildren(fresh.workflows, before?.workflows) } };
+                    });
+                }
             } catch (error) {
                 if (!cancelled) setSidebar({ state: "failed", message: String((error as Error).message) });
             }
-            // The agents' tools take a request per agent: the view waits for them only when it shows a tool.
-            const withAgentTools = items && withTools(items, pkg);
-            withAgentTools?.then(
+            // The agents' tools and the workflows' activities take further requests: the view waits for them only when it shows one.
+            const withChildren = items && detailed(items, pkg);
+            withChildren?.then(
                 (value) => {
                     if (!cancelled) setSidebar({ state: "ready", value });
                 },
-                // The sidebar keeps the tools it last had; a tool's own view reports the failure.
+                // The sidebar keeps the children it last had; a child's own view reports the failure.
                 noop,
             );
             try {
@@ -365,8 +415,8 @@ function App() {
                 } else {
                     // A refresh finds the item again: an edit above it moves its lines.
                     const find = (sidebar?: Sidebar) => (view.key && sidebar ? allItems(sidebar).find((candidate) => candidate.key === view.key) : undefined);
-                    // `items` has no tool children, so a tool's view never runs on its last known, stale place.
-                    const item = find(items) ?? (view.key && withAgentTools ? find(await withAgentTools) : undefined);
+                    // `items` has no children, so a tool's or an activity's view never runs on its last known, stale place.
+                    const item = find(items) ?? (view.key && withChildren ? find(await withChildren) : undefined);
                     if (view.key && items && !item) throw new Error(`${view.title} is no longer in the code.`);
                     const flow = await flowOf(pkg, item?.location ?? view.location);
                     const agent = item?.agent === true;
@@ -420,6 +470,37 @@ function App() {
         },
         [openFlow],
     );
+    const fromWorkflow = useCallback((workflow: OverviewWorkflow) => openFlow(workflow.symbol, workflow.location), [openFlow]);
+    /**
+     * A click on a node of a flow drawn read only, which the diagram itself ignores: a workflow run opens
+     * that workflow, an activity call that activity (under the open workflow when it is one).
+     */
+    const targetItem = (target: HTMLElement): Item | undefined => {
+        const id = target.closest("[data-nodeid]")?.getAttribute("data-nodeid");
+        const flow = model.state === "ready" && model.drawn.kind === "flow" ? model.drawn.flow : undefined;
+        const goal = id && flow ? nodeTarget(nodeById(flow.nodes, id)) : undefined;
+        if (!goal || sidebar.state !== "ready") return undefined;
+        const all = allItems(sidebar.value);
+        if (goal.kind === "workflow") return sidebar.value.workflows.find((item) => item.label === goal.name);
+        const under = view.kind === "flow" ? all.find((item) => item.key === activityKey(view.key, goal.name)) : undefined;
+        return under ?? sidebar.value.activities.find((item) => item.label === goal.name);
+    };
+    // A press that moves is a pan of the canvas, not a click.
+    const pressedAt = useRef<{ x: number; y: number }>();
+    const onFlowClick = (event: React.MouseEvent<HTMLDivElement>) => {
+        const start = pressedAt.current;
+        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 4) return;
+        const item = targetItem(event.target as HTMLElement);
+        if (item) openFlow(item.label, item.location, item.key);
+    };
+    // The diagram draws a read-only node with no pointer: show which nodes open something.
+    const onFlowHover = (event: React.MouseEvent<HTMLDivElement>) => {
+        const node = (event.target as HTMLElement).closest<HTMLElement>("[data-nodeid]");
+        if (!node) return;
+        const item = targetItem(node);
+        node.style.cursor = item ? "pointer" : "";
+        node.title = item ? `Open ${item.label}` : "";
+    };
     const back = () => setView({ kind: "overview" });
 
     if (project.state === "failed") return <Notice error title="The integration view could not load" message={project.message} onRetry={() => location.reload()} />;
@@ -428,7 +509,7 @@ function App() {
     const current = view.kind === "flow" ? view.key : "overview";
     const shown: Shown = model.state !== "loading" && model.pkg === pkg && model.view === view ? model : { state: "loading" };
     const drawn = shown.state === "ready" ? shown.drawn : undefined;
-    const empty = drawn?.kind === "overview" && isEmptyDesign(drawn.design) && (!items || items.functions.length + items.agents.length === 0);
+    const empty = drawn?.kind === "overview" && isEmptyDesign(drawn.design) && (!items || items.functions.length + items.agents.length + items.workflows.length + items.activities.length === 0);
 
     const button = (item: Item) => (
         <button aria-current={current === item.key} title={item.label} onClick={() => openFlow(item.verb ? `${item.verb} ${item.label}` : item.label, item.location, item.key)}>
@@ -499,6 +580,25 @@ function App() {
                                 </ul>
                             </>
                         )}
+                        {(items.workflows.length > 0 || items.activities.length > 0) && (
+                            <>
+                                <h2>Workflows</h2>
+                                <ul>
+                                    {items.workflows.map((workflow) => (
+                                        <li key={workflow.key}>
+                                            {button(workflow)}
+                                            {workflow.children && workflow.children.length > 0 && <ul aria-label={`Activities of ${workflow.label}`}>{workflow.children.map(itemButton)}</ul>}
+                                        </li>
+                                    ))}
+                                    {looseActivities(items).length > 0 && (
+                                        <li>
+                                            <div className="group">{items.workflows.length > 0 ? "Other activities" : "Activities"}</div>
+                                            <ul>{looseActivities(items).map(itemButton)}</ul>
+                                        </li>
+                                    )}
+                                </ul>
+                            </>
+                        )}
                         <h2>Functions</h2>
                         {items.functions.length === 0 && <p className="muted">None yet</p>}
                         <ul>{items.functions.map(itemButton)}</ul>
@@ -521,6 +621,7 @@ function App() {
                             onServiceSelect={noop}
                             onFunctionSelect={fromOverview}
                             onAutomationSelect={fromOverview}
+                            onWorkflowSelect={fromWorkflow}
                             onConnectionSelect={noop}
                             onDeleteComponent={noop}
                         />
@@ -533,6 +634,11 @@ function App() {
                         ref={flowHost}
                         key={`flow:${pkg}:${view.key ?? view.title}:${dark}`}
                         onContextMenuCapture={(event) => event.stopPropagation()}
+                        onMouseDownCapture={(event) => {
+                            pressedAt.current = { x: event.clientX, y: event.clientY };
+                        }}
+                        onClick={drawn.agent ? undefined : onFlowClick}
+                        onMouseOver={drawn.agent ? undefined : onFlowHover}
                     >
                         <DrawingGuard onRetry={() => setVersion((v) => v + 1)}>
                             {drawn.agent ? (
