@@ -25,7 +25,7 @@ import { featureEnabled } from "../../lib/profile/profile.ts";
 import { rulesetOwner } from "./auto-mode/classifier-prompt.ts";
 import { feature } from "../../lib/profile/feature.ts";
 import os from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { hasReviewableWork, SUBAGENT_ACTIONS_CHANNEL, type SubagentActionsPayload } from "../../lib/rules/auto-mode-actions.ts";
@@ -62,7 +62,7 @@ import { toolCallEntry, type TranscriptEntry } from "./auto-mode/transcript.ts";
 import { childHistoryCursor, classifierHistory, CLASSIFIER_TOOL_META, CLASSIFIER_USER_INPUT, type HistoryCursor, messageText, userMessageDigest, writtenArguments } from "./auto-mode/history.ts";
 import { appendDecision, type DecisionEntry, decisionEntry } from "./auto-mode/decision-log.ts";
 import { loadProjectInstructions } from "./auto-mode/instructions.ts";
-import { describeCandidate, isSilentFallback } from "../../lib/models/classifier-model.ts";
+import { describeCandidate } from "../../lib/models/classifier-model.ts";
 import { conflictingPathArguments, isWithin, resolveForContainment, toAbsolute } from "../../lib/shell/paths.ts";
 import { DenialStore, denialInputKey, permissionGrantedMessage, permissionGrantReminder, sandboxAskSuffix } from "./auto-mode/denials.ts";
 import { PauseTracker, unattendedPromptNotice, unattendedPromptTimeoutMs } from "./auto-mode/pause.ts";
@@ -83,8 +83,8 @@ import { autoMemoryEnabled } from "../../lib/context/auto-memory.ts";
 import { projectMemoryDir } from "../../lib/context/memory.ts";
 import { queueNotice } from "../../lib/notify/notices.ts";
 import { canShowCustomUi, rpcReadOnlyText } from "../../lib/notify/headless-output.ts";
-import { sessionResultsDir } from "../../lib/request/persisted-output.ts";
-import { privateSessionScratchpadDir } from "../../lib/core/scratchpad.ts";
+import { projectSessionsDir, sessionResultsDir } from "../../lib/request/persisted-output.ts";
+import { privateSessionScratchpadDir, privateSessionTempDir } from "../../lib/core/scratchpad.ts";
 import { CONTEXT_ORDER, REMINDER_CHANNEL, type ReminderPayload } from "../../lib/request/reminders.ts";
 import { readState, readStringsState, recordState } from "../../lib/request/ledger/state.ts";
 import { processState } from "../../lib/profile/process-state.ts";
@@ -100,8 +100,8 @@ import {
 	isPathSubjectTool,
 } from "../../lib/rules/matcher.ts";
 import { type SessionGrant, sessionAllowsApply, sessionGrant } from "./session-grant.ts";
-import { formatModel, modeBadge, nextMode, PERMISSION_MODE_STATE, PERMISSION_STATUS_CHANNEL, type PermissionStatus, CYCLE_KEY } from "../../lib/rules/modes.ts";
-import { intrinsicTier, usesClaudeCodeFastPaths } from "../../lib/models/model-tier.ts";
+import { modeBadge, nextMode, PERMISSION_MODE_STATE, PERMISSION_STATUS_CHANNEL, type PermissionStatus, CYCLE_KEY } from "../../lib/rules/modes.ts";
+import { usesClaudeCodeFastPaths } from "../../lib/models/model-tier.ts";
 import { type ChildToolCall, type ChildGateDecision, sessionPermissionBridge, SUBAGENT_GATE_CHANNEL } from "../../lib/agents/subagent-gate.ts";
 import { trackOriginalCommands } from "../../lib/shell/original-command.ts";
 import { followWorkCwd } from "../../lib/agents/worktree-channel.ts";
@@ -157,7 +157,7 @@ import { autoModeSystemNote } from "./auto-mode/system-note.ts";
 import { announceArgumentHint } from "../../lib/ui/argument-hints.ts";
 import { userDenialText } from "../../lib/consent/user-denial.ts";
 import { permissionText, refusalText, unansweredAskReason } from "../../lib/rules/permission-text.ts";
-import { liveUiCtx } from "../../lib/ui/tui-render.ts";
+import { liveUiCtx, withClassifierAllowedRow } from "../../lib/ui/tui-render.ts";
 import { askPermission } from "../../lib/ui/permission-dialog.ts";
 import { askView } from "./ask-view.ts";
 
@@ -345,8 +345,6 @@ function permissionsExtension(pi: ExtensionAPI) {
 	// `defaultMode` (or `--permission-mode`) still overrides this; `auto` from a
 	// project file is still refused. See working-docs/decisions/auto-mode.md.
 	let mode: PermissionMode = "auto";
-	/** Whether the session model gets Claude Code's fast paths, for the model-switch notice. */
-	let gateFastPaths: boolean | undefined;
 	/** `permissions.blockReadsOutsideWorkingDirectories` from any settings source. */
 	let blockOutsideReads = false;
 	/** The first outside-read prompt was answered on this machine (read once, then kept). */
@@ -421,8 +419,14 @@ function permissionsExtension(pi: ExtensionAPI) {
 	let secretPaths: string[] = [];
 	/** The harness's readable session dirs, resolved at session start; `readableRoots` adds the workspace to them. */
 	let harnessReadableRoots: string[] = [];
-	/** The shipped docs the `one-code-guide` agent reads (lib/agents/guide-docs.ts): readable, never writable. */
-	let docsDirPaths: string[] = [];
+	/**
+	 * Readable, never writable: the shipped docs the `one-code-guide` agent reads
+	 * (lib/agents/guide-docs.ts), and the project's private temp folder, where
+	 * every session of this project, a subagent's included, spools background
+	 * output (`taskOutputPath`), as Claude Code allows reads of its project temp
+	 * folder (findings §103).
+	 */
+	let readOnlyDirPaths: string[] = [];
 	/**
 	 * Workspace directories (workspace.ts): from settings, where the
 	 * repository's own files apply only once the user trusts them, from
@@ -447,7 +451,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 		const trusted = settingsWorkspaceDirs.filter((dir) => projectAllowTrusted || !isRepoFile(dir.source)).map((dir) => dir.path);
 		workspacePaths = [...new Set([...trusted, ...flagWorkspaceDirs, ...sessionWorkspaceDirs].map((dir) => tryRealpath(dir) ?? dir))];
 		workspaceDirs = [...new Set(workspacePaths.map(resolvedOrSelf))];
-		readableRoots = [...harnessReadableRoots, ...docsDirPaths, ...workspaceDirs];
+		readableRoots = [...harnessReadableRoots, ...readOnlyDirPaths, ...workspaceDirs];
 		if (sessionStarted) announceWorkspace();
 	};
 	/** What the system prompt was last told the workspace is (lib/rules/workspace-channel.ts). */
@@ -618,8 +622,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 		autoConfig ??= loadAutoModeConfig(os.homedir());
 		if (!autoConfig.logDecisions) return;
 		try {
-			// Beside the transcripts; a session-less run's private temp dir, never the project.
-			const file = join(sessionResultsDir(ctx), "auto-mode-decisions.jsonl");
+			const file = join(projectSessionsDir(ctx), "auto-mode-decisions.jsonl");
 			appendDecision(file, decisionEntry({ sessionId: ctx.sessionManager.getSessionId?.(), ...entry }));
 		} catch {
 			// Logging must never break the gate.
@@ -656,13 +659,6 @@ function permissionsExtension(pi: ExtensionAPI) {
 			classifierState.notified.add(notice.text);
 			if (notice.level === "warning") badgeCtx.ui.notify(notice.text, "warning");
 			else info.push(notice.text);
-		}
-		const first = choice.candidates.find((entry) => !classifierState.rejected.has(`${entry.model.provider}/${entry.model.id}`));
-		const key = first ? `using:${first.model.provider}/${first.model.id}` : undefined;
-		if (first && key && !classifierState.notified.has(key)) {
-			classifierState.notified.add(key);
-			if (choice.fallback) classifierState.notified.add(choice.fallback.text);
-			if (!isSilentFallback(choice.fallback)) info.push(choice.fallback?.text ?? `Auto mode will screen calls with ${describeCandidate(first)}.`);
 		}
 		if (info.length === 0) return;
 		if (opts.batched) queueNotice(pi.events, badgeCtx, "info", info.join("\n"));
@@ -842,6 +838,8 @@ function permissionsExtension(pi: ExtensionAPI) {
 			}
 		}
 		const resolvedPaths = actionResolvedPaths(normalizeToolName(toolName), subject, opts?.powershellParse, { cwd, home, roots: [cwd, ...workspaceDirs] });
+		const pinnedBefore = classifierState.pinned;
+		const rejectedBefore = classifierState.rejected.size;
 		const verdict = await classify(
 			{
 				toolName,
@@ -865,13 +863,14 @@ function permissionsExtension(pi: ExtensionAPI) {
 				onModelUnusable: onClassifierModelUnusable,
 				onNotice: (message, level) => {
 					ctx.ui.notify(message, level);
-					// The badge names the classifier, so it has to repaint when the first
-					// call settles which model that is.
-					badgeCtx ??= ctx;
-					applyBadge();
 				},
 			},
 		);
+		// The badge names the classifier, so it repaints when a call settles or rules out a model.
+		if (classifierState.pinned !== pinnedBefore || classifierState.rejected.size !== rejectedBefore) {
+			badgeCtx ??= ctx;
+			applyBadge();
+		}
 		logDecision(ctx, {
 			tool: toolName,
 			subject,
@@ -1067,14 +1066,27 @@ function permissionsExtension(pi: ExtensionAPI) {
 		inFlightMainCalls = [];
 	});
 
+	/**
+	 * The calls the auto-mode classifier allowed this process, by tool call id,
+	 * for Claude Code's dim `⎿ Allowed by auto mode` row under their results.
+	 * Display only and never persisted, as Claude Code's is not: a resumed
+	 * session draws no row.
+	 */
+	const classifierAllowed = new Set<string>();
+	pi.registerToolRenderer?.((_name, next) => withClassifierAllowedRow(next(), (id) => classifierAllowed.has(id)));
+
+	let allowedFor: string | undefined;
 	pi.on("session_start", (event, ctx) => {
+		// A /reload keeps the session and its transcript, so its rows stay.
+		const sessionId = ctx.sessionManager.getSessionId();
+		if (sessionId !== allowedFor) classifierAllowed.clear();
+		allowedFor = sessionId;
 		childPermissionSession?.abort();
 		childPermissionSession = new AbortController();
 		badgeCtx = ctx;
 		lastReviewCtx = ctx;
 		sessionEpoch++;
 		panels.reset();
-		gateFastPaths = usesClaudeCodeFastPaths(ctx.model);
 		// Not awaited: the grammar loads in a few milliseconds, and the gate
 		// awaits it per call. Only a failed load is worth telling the user about.
 		void bashParserReady().then(() => {
@@ -1107,7 +1119,8 @@ function permissionsExtension(pi: ExtensionAPI) {
 		resultsDirPath = resolvedOrSelf(sessionResultsDir(ctx));
 		sessionDirPath = resolvedOrSelf(ctx.sessionManager.getSessionDir());
 		harnessReadableRoots = [memoryDirPath, scratchpadDirPath, resultsDirPath, sessionDirPath].filter((d): d is string => !!d).map(resolvedOrSelf);
-		docsDirPaths = guideDocsDirs().map(resolvedOrSelf);
+		const sessionTemp = privateSessionTempDir(ctx.cwd, ctx.sessionManager.getSessionId());
+		readOnlyDirPaths = [...guideDocsDirs(), ...(sessionTemp ? [dirname(sessionTemp)] : [])].map(resolvedOrSelf);
 		// `--add-dir`: each directory is validated like one added in the panel.
 		flagWorkspaceDirs = [];
 		for (const entry of parseAddDirFlag(pi.getFlag("add-dir") as string | undefined)) {
@@ -1179,20 +1192,8 @@ function permissionsExtension(pi: ExtensionAPI) {
 		autoInCycle = ctx.modelRegistry.getAvailable().length > 0;
 		resetClassifierChoice(event.model, "batched");
 		// The gate reads the model's tier on every call, so a switch takes effect
-		// on the next one; a switch across the workhorse/cheap line says so.
-		const fastPaths = usesClaudeCodeFastPaths(event.model);
-		if (gateFastPaths !== undefined && fastPaths !== gateFastPaths && event.model) {
-			const name = `${formatModel(event.model.provider, event.model.id)} (${intrinsicTier(event.model)} tier)`;
-			queueNotice(
-				pi.events,
-				ctx,
-				"info",
-				fastPaths
-					? `${name}: permissions now follow the standard fast paths.`
-					: `${name}: permissions now use ${brand.name}'s stricter checks, so more calls prompt or go to the auto-mode classifier.`,
-			);
-		}
-		gateFastPaths = fastPaths;
+		// on the next one, unannounced: which checks a tier gets is the gate's
+		// routine choice, not news for the user.
 	});
 
 	// The badge carries "· esc to interrupt" only while the model works (CC's
@@ -1476,7 +1477,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 				workspaceDirs: dirs,
 				claudeCodeFastPaths: usesClaudeCodeFastPaths(ctx.model),
 				blockReadsOutsideWorkingDirectories: blockOutsideReads,
-				readOnlyDirs: docsDirPaths,
+				readOnlyDirs: readOnlyDirPaths,
 				powershellParse,
 			});
 		let result = decideWith([...allow, ...activeSessionAllows(), ...(projectAllowTrusted ? projectAllow : [])]);
@@ -1606,6 +1607,9 @@ function permissionsExtension(pi: ExtensionAPI) {
 				if (outcome.decision === "allow") {
 					noteAllow();
 					denials.settle(inputKey);
+					// The classifier itself cleared it (a fast-path allow has no tier): the
+					// transcript says so under the result, as Claude Code does.
+					if (outcome.tier !== undefined) classifierAllowed.add(event.toolCallId);
 					// The classifier read the call's own hosts with the command: they hold for this one run.
 					grantCommandHosts(event.toolCallId, hosts);
 					return undefined;
@@ -1806,7 +1810,7 @@ function permissionsExtension(pi: ExtensionAPI) {
 			// The child's own model: a cheaper subagent gets the stricter gate.
 			claudeCodeFastPaths: usesClaudeCodeFastPaths(call.model),
 			blockReadsOutsideWorkingDirectories: blockOutsideReads,
-			readOnlyDirs: call.resultsDirPath && resultsDirPath ? [...docsDirPaths, resultsDirPath] : docsDirPaths,
+			readOnlyDirs: call.resultsDirPath && resultsDirPath ? [...readOnlyDirPaths, resultsDirPath] : readOnlyDirPaths,
 			powershellParse,
 		});
 

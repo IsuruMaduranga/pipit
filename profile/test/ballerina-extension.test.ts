@@ -170,6 +170,8 @@ describe("the Ballerina extension", () => {
 		const sessionDir = join(root, ".session");
 		const result = await callTool(load(ballerina).fake, root, sessionDir);
 		expect(result.content[0].text).toContain("<persisted-output>");
-		expect(result.content[0].text).toContain(join(sessionDir, "tool-results", "toolu_test.txt"));
+		const saved = join(sessionDir, "fake-session", "tool-results", "toolu_test.txt");
+		expect(result.content[0].text).toContain(saved);
+		expect(readFileSync(saved, "utf8")).toContain("- variableNumber899: string, required, NOT SET (main.bal:900)");
 	});
 });
