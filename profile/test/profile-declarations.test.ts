@@ -1,11 +1,10 @@
 /**
  * What the profile declares for the base to apply: its own settings, a
- * thinking level per model tier, an OpenRouter quantization floor per
- * vendor, and the background tools it leaves out. The base refuses a malformed declaration at load; these tests ask
+ * thinking level per model tier, no OpenRouter routing, and the
+ * background tools it leaves out. The base refuses a malformed declaration at load; these tests ask
  * its checks directly and pin what the product chose.
  */
 import { describe, expect, it } from "vitest";
-import { openRouterRoutingProblems } from "../../extensions/lib/profile/openrouter-routing.ts";
 import { productSettingProblems } from "../../extensions/lib/profile/settings-keys.ts";
 import { thinkingDefaultProblems } from "../../extensions/lib/profile/thinking-defaults.ts";
 import { profile } from "../index.ts";
@@ -27,9 +26,7 @@ describe("the profile's declarations", () => {
 		expect(thinkingDefaultProblems(profile.defaultThinkingLevels ?? {})).toEqual([]);
 	});
 
-	it("keeps DeepSeek and Qwen models on OpenRouter hosts at 8-bit precision or better, and leaves z-ai and minimax unset", () => {
-		const floor = ["fp8", "bf16", "fp16", "fp32", "unknown"];
-		expect(profile.openRouterRouting).toEqual({ deepseek: { quantizations: floor }, qwen: { quantizations: floor } });
-		expect(openRouterRoutingProblems(profile.openRouterRouting ?? {})).toEqual([]);
+	it("leaves the choice of OpenRouter hosts to the user", () => {
+		expect(profile.openRouterRouting).toBeUndefined();
 	});
 });

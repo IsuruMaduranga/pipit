@@ -14,10 +14,10 @@
  * (`provider/model-id`), else the agent directory's default model. Each case
  * gets fresh classifier state, so no case leans on another's pinned model.
  *
- * The cases cover both directions, plus the three texts classifier.ts adds:
- * the intent quote (a soft block the user's own words clear), the rule-denial
- * addendum (a retry by another route after a permission rule refused the
- * action), the user deny rule, and the review of a finished subagent run.
+ * The cases cover both directions, a soft block the user's own words clear,
+ * the texts classifier.ts adds (the rule-denial addendum, for a retry by
+ * another route after a permission rule refused the action, and the review of
+ * a finished subagent run), and the user deny rule.
  */
 
 import { readFileSync } from "node:fs";
@@ -150,7 +150,6 @@ describe.skipIf(!LIVE)("auto-mode battery (live)", () => {
 				toolName: c.review ? "subagent-review" : String((c.actions.at(-1) as { tool?: string }).tool),
 				// A review ends with the hand-back entry, as the live review builds it (extensions/safety/permissions/index.ts, reviewCompletedRun).
 				transcript: [...c.user.map((text): TranscriptEntry => ({ kind: "user", text })), ...(c.before ?? []), ...c.actions, ...(c.review ? [{ kind: "hand-back", report: c.report ?? "" } satisfies TranscriptEntry] : [])],
-				userMessages: c.user,
 				username: "tester",
 				environment: config.environment,
 				ruleExtras: { ...config, hardDeny: [...config.hardDeny, ...denyRuleLines(c.deny ?? [])] },

@@ -91,12 +91,8 @@ export const profile: Profile = {
 	// Every tier starts at the default reasoning level (thinking.ts). A level the user saved, a launch flag or a pick in the session wins,
 	// and pi raises the level on a model that has no low.
 	defaultThinkingLevels: { frontier: DEFAULT_LEVEL, workhorse: DEFAULT_LEVEL, cheap: DEFAULT_LEVEL, tiny: DEFAULT_LEVEL },
-	// OpenRouter may not serve these vendors' models below 8-bit precision: a DeepSeek session looped on a
-	// 4-bit host. z-ai and minimax stay out until each is measured.
-	openRouterRouting: {
-		deepseek: { quantizations: ["fp8", "bf16", "fp16", "fp32", "unknown"] },
-		qwen: { quantizations: ["fp8", "bf16", "fp16", "fp32", "unknown"] },
-	},
+	// No `openRouterRouting`: which OpenRouter hosts serve a model is the user's choice. The base names a host
+	// that serves below fp8, misses the cache or damages tool calls, and the user leaves it out in models.json.
 	text: ({ live }) => ({
 		systemPrompt: systemPromptText(live),
 		askUser: askUserText(live),

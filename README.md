@@ -99,12 +99,11 @@ saved, a level you pass with `--thinking`, and a level you pick in the session
 with `/effort` or shift+tab all win over this default. On a model that has no
 `low`, the harness runs the nearest level the model has above it.
 
-On OpenRouter, requests for DeepSeek and Qwen models are limited to hosts that
-serve the model at 8-bit precision or better (`fp8`, `bf16`, `fp16`, `fp32`,
-or a host that does not say). Lower-precision hosts were seen to make a
-session lose track of its own steps. A routing entry for the model in your `~/.pipit/agent/models.json` that sets
-`quantizations`, `only` or `order` replaces this limit, and setting
-`PIPIT_OPENROUTER_ROUTING_DEFAULTS=0` turns it off for every model.
+On OpenRouter, Pipit leaves the choice of host to you and OpenRouter. It
+names a host when that host serves a reply below 8-bit precision, misses the
+prompt cache three times in a row, or sends a damaged tool call. To leave a
+host out for one model, add it to the model's `ignore` list under
+`compat.openRouterRouting` in `~/.pipit/agent/models.json`.
 
 ## Check a change
 
