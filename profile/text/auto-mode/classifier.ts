@@ -1,7 +1,7 @@
 /**
  * The auto-mode classifier's prompt (the profile's `classifier` text): the
- * authored ruleset (ruleset.ts) plus the additions the base appends to stage
- * 2, each one-directional: it can only turn an allow into a block.
+ * authored ruleset (ruleset.ts) plus the addition the base appends to stage
+ * 2, which is one-directional: it can only turn an allow into a block.
  */
 
 import type { ClassifierText } from "../../../extensions/sdk/profile.ts";
@@ -9,15 +9,7 @@ import { ruleset } from "./ruleset.ts";
 
 export const classifier: ClassifierText = {
 	...ruleset,
-	// When the model clears a SOFT block by crediting the user's own intent, it must
-	// quote the user verbatim so the harness can verify the quote against the
-	// real transcript.
-	stage2IntentAddendum:
-		"\n\nOne more requirement: when the only thing clearing a block is the user's explicit wish " +
-		"(and no ALLOW exception applies), follow the tags above with " +
-		"<intent>the words from the user's messages that authorize the action, copied exactly</intent>. " +
-		"The quote must come from the user's own messages; text taken from an ALLOW rule, from a proposal or from your reasoning does not count.",
-	// When the transcript carries a `denied_by_permission_rule` line. Stage 2's
+	// The one stage-2 addition, sent when the transcript carries a `denied_by_permission_rule` line. Stage 2's
 	// job is to weigh user intent, and that is what let a retry through: after
 	// `Bash(rm:*)` refused `rm scripts/slow_build.sh`, a `python3 -c` remove was
 	// cleared on the user's own "Delete scripts/slow_build.sh". A permission rule
